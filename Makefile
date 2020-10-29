@@ -20,11 +20,13 @@ options:
 	@echo "LDFLAGS  = ${LDFLAGS}"
 	@echo "CC       = ${CC}"
 
+${OBJ}: config.h config.mk
+
 ${BIN}: ${OBJ}
 	${CC} ${LDFLAGS} ${OBJ} -o $@
 
 .${EXT}.o:
-	${CC} ${CFLAGS} -c $<
+	${CC} -c ${CFLAGS} $<
 
 dist: clean
 	${MKDIR} ${DIST}
