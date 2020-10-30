@@ -30,7 +30,7 @@ ${BIN}: ${OBJ}
 
 dist: clean
 	${MKDIR} ${DIST}
-	${CP} -R config.mk Makefile ${SRC} ${DIST}
+	${CP} -R config.h config.mk Makefile ${SRC} ${DIST}
 	${TAR} ${DIST}.tar ${DIST}
 	${GZIP} ${DIST}.tar
 	${RM_DIR} ${DIST}
@@ -39,16 +39,17 @@ run:
 	./${BIN}
 
 install: all
-	${MKDIR} ${DESTDIR}${BIN_DIR} ${DESTDIR}${MAN_DIR}
+	#${MKDIR} ${DESTDIR}${BIN_DIR} ${DESTDIR}${MAN_DIR}
+	${MKDIR} ${DESTDIR}${BIN_DIR}
 	${CP} ${BIN} ${BIN_DIR}
-	${CP} ${MAN1} ${DESTDIR}${MAN_DIR}
-	sed "s/VERSION/${VERSION}/g" < ${MAN1} > ${DESTDIR}${MAN_DIR}/${MAN1}
+	#${CP} ${MAN1} ${DESTDIR}${MAN_DIR}
+	#sed "s/VERSION/${VERSION}/g" < ${MAN1} > ${DESTDIR}${MAN_DIR}/${MAN1}
 	chmod 755 ${DESTDIR}${BIN_DIR}/${BIN}
-	chmod 644 ${DESTDIR}${MAN_DIR}/${MAN1}
+	#chmod 644 ${DESTDIR}${MAN_DIR}/${MAN1}
 
 uninstall:
 	${RM} ${DESTDIR}${BIN_DIR}/${BIN}
-	${RM} ${DESTDIR}${MAN_DIR}/${MAN1}
+	#${RM} ${DESTDIR}${MAN_DIR}/${MAN1}
 
 clean:
 	${RM} ${BIN} ${OBJ} ${DIST}.tar.gz

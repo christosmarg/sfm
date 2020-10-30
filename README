@@ -1,0 +1,17 @@
+sfm - simple file manager
+=========================
+
+sfm is a minimal file manager for UNIX-based operating systems
+that follows the suckless style of configuration.
+
+Usage
+-----
+        cd sfm
+        sudo make install clean
+
+sfm will be installed in /usr/local/bin by default.
+Configuration is done by editing config.h and recompiling the source code.
+
+Note
+----
+This project is still early in development so you can't use sfm yet.

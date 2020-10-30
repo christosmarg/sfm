@@ -17,23 +17,28 @@
 #define PATH_MAX 4096
 #endif /* PATH_MAX */
 
+#define PARENT_COL      0
+#define FOCUS_COL       40
+#define FOCUS_NCHLD_COL 80
+#define CHILD_COL       95
+
 #define YMAX            (getmaxy(stdscr))
 #define XMAX            (getmaxx(stdscr))
 #define MIN(x, y)       ((x) < (y) ? (x) : (y))
 #define MAX(x, y)       ((x) > (y) ? (x) : (y))
 #define ARRLEN(x)       (sizeof(x) / sizeof(x[0]))
 #define ISDIGIT(x)      ((unsigned int)(x) - '0' <= 9)
-#define SEL_CORRECT     (sel = ((sel < 0) ? 0 : (sel > nfiles - 1) ? nfiles - 1 : sel))
+#define SEL_CORRECT     (fsel = ((fsel < 0) ? 0 : (fsel > nfiles - 1) ? nfiles - 1 : fsel))
 
 /* structs, unions and enums */
 typedef struct {
-        // may use just dirent
-        char            *name;
-        char             abspath[PATH_MAX];
-        off_t            size;
-        int              nchld;
-        unsigned short   nmlen;
-        unsigned char    type;
+        char            name[NAME_MAX];
+        char            abspath[PATH_MAX];
+        off_t           size;
+        unsigned int    nchld;
+        unsigned int    nparents;
+        unsigned short  nmlen;
+        unsigned char   type;
 } Entry;
 
 typedef union {
@@ -49,37 +54,59 @@ typedef struct {
         const Arg arg;
 } Key;
 
-enum NavFlags {
+enum {
         NAV_LEFT,
         NAV_RIGHT,
         NAV_UP,
         NAV_DOWN,
         NAV_TOP,
-        NAV_BOTTOM
+        NAV_BOTTOM,
+        NAV_SHOWALL,
 };
 
-// add sort flags (by size, name etc)
+enum {
+        ENTSORT_NAME_ASC,
+        ENTSORT_NAME_DESC,
+};
 
 /* globals */
-static unsigned long nfiles = 0;
-static int sel = 0;
 static Entry *entrs = NULL;
+static unsigned long nfiles = 0;
+static int fsel = 0; /* focused sel */
+static int showall = 0;
 
 /* function declarations */
 static void      cursesinit(void);
 static int       entriescount(const char *);
 static Entry    *entriesget(const char *);
 static void      pathdraw(const char *);
-static void      dirdraw(const Entry *);
+static void      focusdraw(const Entry *);
+static void      dirpreview(const Entry *, int, int, int);
+static void      filepreview(const Entry *);
 static void      promptget(const Arg *);
 static void      nav(const Arg *);
 static void      cd(const Arg *);
+static void      entsort(const Arg *);
 static void      spawn(const Arg *);
 static void      quit(const Arg *);
+static void      run(void);
+static void      die(const char *, ...);
 
 #include "config.h"
 
 /* function implementations */
+static inline int
+entcmpnameasc(const void *lhs, const void *rhs)
+{
+        return (strcmp(((Entry *)lhs)->name, ((Entry *)rhs)->name) > 0);
+}
+
+static inline int
+entcmpnamedesc(const void *lhs, const void *rhs)
+{
+        return (strcmp(((Entry *)lhs)->name, ((Entry *)rhs)->name) < 0);
+}
+
 void
 cursesinit(void)
 {
@@ -88,7 +115,7 @@ cursesinit(void)
         cbreak();
         curs_set(0);
         keypad(stdscr, 1);
-        scrollok(stdscr, 1);
+        /*scrollok(stdscr, 1);*/
 }
 
 int
@@ -96,18 +123,19 @@ entriescount(const char *path)
 {
         DIR *dir;
         struct dirent *dp;
-        int nentrs = 0;
+        int n = 0;
         
         if ((dir = opendir(path)) == NULL)
-                return -1; // this might cause bugs
-        // get hidden files flag
+                return 0;
         while ((dp = readdir(dir)) != NULL) {
-                if (strcmp(dp->d_name, path) &&  strcmp(dp->d_name, ".")
+                if (!showall && dp->d_name[0] == '.')
+                        continue;
+                if (strcmp(dp->d_name, path) && strcmp(dp->d_name, ".")
                 &&  strcmp(dp->d_name, ".."))
-                        nentrs++;
+                        n++;
         }
         closedir(dir);
-        return nentrs;
+        return n;
 }
 
 Entry *
@@ -115,69 +143,90 @@ entriesget(const char *path)
 {
         DIR *dir;
         struct dirent *dp;
-        Entry *entrs;
+        Entry *dents;
+        int i = 0;
         
-        if ((entrs = malloc(entriescount(path) * sizeof(Entry))) == NULL)
+        if ((dents = malloc(entriescount(path) * sizeof(Entry))) == NULL)
                 return NULL;
         if ((dir = opendir(path)) == NULL)
                 return NULL;
-        nfiles = 0;
-        // get hidden files flag
         while ((dp = readdir(dir)) != NULL) {
-                if (strcmp(dp->d_name, path) &&  strcmp(dp->d_name, ".")
+                if (!showall && dp->d_name[0] == '.')
+                        continue;
+                if (strcmp(dp->d_name, path) && strcmp(dp->d_name, ".")
                 &&  strcmp(dp->d_name, "..")) {
-                        entrs[nfiles].name = dp->d_name;
-                        entrs[nfiles].nmlen = strlen(dp->d_name);
-                        entrs[nfiles].type = dp->d_type;
-                        sprintf(entrs[nfiles].abspath, "%s/%s", path, dp->d_name);
-                        entrs[nfiles].nchld = entriescount(entrs[nfiles].abspath);
-                        nfiles++;
+                        strcpy(dents[i].name, dp->d_name);
+                        dents[i].nmlen = strlen(dp->d_name);
+                        dents[i].type = dp->d_type;
+                        sprintf(dents[i].abspath, "%s/%s", path, dp->d_name);
+                        dents[i].nchld = entriescount(dents[i].name);
+                        dents[i].nparents = entriescount("..");
+                        i++;
                 }
         }
         closedir(dir);
-        return entrs;
+        return dents;
 }
 
 void
 pathdraw(const char *path)
 {
+        mvprintw(YMAX - 1, XMAX - 10, "%ld/%ld\n", fsel + 1, nfiles); // shouldn't be here
         attron(A_BOLD);
         mvprintw(0, 0, "%s\n", path);
         attroff(A_BOLD);
-        /*mvhline(1, 0, ACS_HLINE, XMAX);*/
+        mvhline(1, 0, ACS_HLINE, XMAX);
 }
 
 void
-dirdraw(const Entry *entrs)
+focusdraw(const Entry *dents)
 {
         int i = 0;
 
-        SEL_CORRECT;
-        for (; i < nfiles; i++) {
-                if (i == sel)
+        for (; i < nfiles && i < YMAX; i++) {
+                if (i == fsel)
                         attron(A_REVERSE);
-                mvprintw(i + 1, 0, "%s\n", entrs[i].name);
-                // align numbers
-                if (entrs[i].type == DT_DIR)
-                        mvprintw(i + 1, 50, "%12.ld\n", entrs[i].nchld);
+                mvprintw(i + 2, FOCUS_COL, "%s\n", dents[i].name);
+                // align numbers properly
+                if (dents[i].type == DT_DIR)
+                        mvprintw(i + 2, FOCUS_NCHLD_COL, "%12.ld\n", dents[i].nchld);
                 attroff(A_REVERSE);
         }
+}
+
+// might merge with focusdraw
+void
+dirpreview(const Entry *dents, int n, int sel, int col)
+{
+        int i = 0;
+
+        for (; i < n && i < YMAX; i++) {
+                if (i == sel)
+                        attron(A_REVERSE);
+                mvprintw(i + 2, col, "%s\n", dents[i].name);
+                attroff(A_REVERSE);
+        }
+}
+
+void
+filepreview(const Entry *entry)
+{
+        FILE *fp;
+        char buf[BUFSIZ];
+        int ln = 0;
+
+        if ((fp = fopen(entry->name, "r")) == NULL)
+                return;
+        while (fgets(buf, BUFSIZ, fp) && ln < YMAX)
+                mvprintw(ln++ + 2, 120, "%s\n", buf);
+        fclose(fp);
 }
 
 // handle user given shell cmds
 void
 spawn(const Arg *arg)
 {
-        // huh?
-        char buf[BUFSIZ];
-
-        snprintf(buf, BUFSIZ, ((char **)arg->f)[2], entrs[sel].name);
-        printw("Confirm action %s (y/n): ", ((char **)arg->f)[0]);
-        if (getch() == 'y') {
-                /*execvp(*((char **)arg->f), (char **)arg->f);*/
-                printw(" done");
-        }
-        getch();
+        /*execvp(*((char **)arg->f), (char **)arg->f);*/
 }                                                
                                                  
 void                        
@@ -202,25 +251,41 @@ nav(const Arg *arg)
                 chdir("..");
                 break;
         case NAV_RIGHT:
-                if (entrs[sel].name != NULL) {
+                if (entrs[fsel].name != NULL) {
                         // handle symlinks
-                        if (entrs[sel].type == DT_DIR)
-                                chdir(entrs[sel].name);
-                        /*else if (entrs[sel].type == DT_REG)*/
+                        if (entrs[fsel].type == DT_DIR)
+                                chdir(entrs[fsel].name);
+                        /*else if (entrs[fsel].type == DT_REG)*/
                                 /*spawn();*/
                 }
                 break;
         case NAV_UP:
-                sel--;
+                fsel--;
                 break;
         case NAV_DOWN:
-                sel++;
+                fsel++;
                 break;
         case NAV_TOP:
-                sel = 0;
+                fsel = 0;
                 break;
         case NAV_BOTTOM:
-                sel = nfiles - 1;
+                fsel = nfiles - 1;
+                break;
+        case NAV_SHOWALL:
+                showall = !showall;
+                break;
+        }
+}
+
+void
+entsort(const Arg *arg)
+{
+        switch (arg->n) {
+        case ENTSORT_NAME_ASC:
+                qsort(entrs, nfiles, sizeof(Entry), entcmpnameasc);
+                break;
+        case ENTSORT_NAME_DESC:
+                qsort(entrs, nfiles, sizeof(Entry), entcmpnamedesc);
                 break;
         }
 }
@@ -238,26 +303,84 @@ quit(const Arg *arg)
         exit(0);
 }
 
+void *
+emalloc(size_t nb)
+{
+        void *p;
+
+        if ((p = malloc(nb)) == NULL)
+                die("emalloc:");
+        return p;
+}
+
+void
+die(const char *fmt, ...)
+{
+        va_list args;
+        
+        va_start(args, fmt);
+        vfprintf(stderr, fmt, args);
+        va_end(args);
+
+        if (fmt[0] && fmt[strlen(fmt)-1] == ':') {
+                fputc(' ', stderr);
+                perror(NULL);
+        } else
+                fputc('\n', stderr);
+
+        exit(EXIT_FAILURE);
+
+}
+
+void
+run(void)
+{
+}
+
 int
 main(int argc, char *argv[])
 {
-        /*Entry *entrs;*/
-        char cwd[PATH_MAX], *curdir;
+        Entry *parent = NULL, *child = NULL;
+        char cwd[PATH_MAX], *curdir, prevdir[PATH_MAX] = {0};
         int c, i;
 
-        if ((curdir = getcwd(cwd, sizeof(cwd))) == NULL) {
-                return -1;
-        }
+        // check for NCURSES_VERSION
         cursesinit();
+        if ((curdir = getcwd(cwd, sizeof(cwd))) == NULL)
+                die("can't get cwd");
+        run();
 
         for (;;) {
                 erase();
 
                 curdir = getcwd(cwd, sizeof(cwd));
-                entrs = entriesget(curdir);
+                if (strcmp(curdir, prevdir) != 0) {
+                        if (entrs != NULL)
+                                free(entrs);
+                        if (parent != NULL)
+                                free(parent);
+                        /*if (child != NULL)*/
+                                /*free(child);*/
+                        nfiles = entriescount(curdir);
+                        if ((entrs = entriesget(curdir)) == NULL)
+                                continue;
+                        if ((parent = entriesget("..")) == NULL)
+                                continue;
+                        /*if (entrs[fsel].type == DT_DIR)*/
+                                /*if ((child = entriesget(entrs[fsel].name)) == NULL)*/
+                                        /*continue;*/
+                        // is this a memleak?
+                        strcpy(prevdir, curdir);
+                }
 
+                SEL_CORRECT;
                 pathdraw(curdir);
-                dirdraw(entrs);
+                if (strcmp(curdir, "/") != 0)
+                        dirpreview(parent, entrs[fsel].nparents, fsel, PARENT_COL);
+                focusdraw(entrs);
+                /*if (entrs[fsel].type == DT_REG)*/
+                        /*filepreview(&entrs[fsel]);*/
+                /*dirpreview(child, entrs[fsel].nchld, fsel, CHILD_COL);*/
 
                 c = getch();
                 for (i = 0; i < ARRLEN(keys); i++) {
@@ -272,7 +395,6 @@ main(int argc, char *argv[])
                 }
 
                 refresh();
-                free(entrs);
         }
 
         return 0;
