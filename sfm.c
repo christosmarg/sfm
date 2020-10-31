@@ -1,26 +1,33 @@
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 #include <dirent.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <ncurses.h>
 
-#ifndef NAME_MAX
-#define NAME_MAX 256
-#endif /* NAME_MAX */
+// why tho
+#ifndef DT_DIR
+#define DT_DIR 4
+#endif /* DT_DIR */
 
-#ifndef PATH_MAX
-#define PATH_MAX 4096
-#endif /* PATH_MAX */
+#ifndef DT_REG
+#define DT_REG 8
+#endif /* DT_REG */
+
+#define PATH_MAX        1024 // syslimits' PATH_MAX?
+#define HOST_NAME_MAX   _POSIX_HOST_NAME_MAX
+#define LOGIN_NAME_MAX  _POSIX_LOGIN_NAME_MAX
 
 #define PARENT_COL      0
-#define FOCUS_COL       40
-#define FOCUS_NCHLD_COL 80
-#define CHILD_COL       95
+#define FOCUS_COL       ((XMAX / 2) / 3)
+#define CHILD_COL       (XMAX / 2)
 
 #define YMAX            (getmaxy(stdscr))
 #define XMAX            (getmaxx(stdscr))
@@ -28,13 +35,14 @@
 #define MAX(x, y)       ((x) > (y) ? (x) : (y))
 #define ARRLEN(x)       (sizeof(x) / sizeof(x[0]))
 #define ISDIGIT(x)      ((unsigned int)(x) - '0' <= 9)
-#define SEL_CORRECT     (fsel = ((fsel < 0) ? 0 : (fsel > nfiles - 1) ? nfiles - 1 : fsel))
+#define SEL_CORRECT     (msel = ((msel < 0) ? 0 : (msel > nfiles - 1) ? nfiles - 1 : msel))
 
 /* structs, unions and enums */
 typedef struct {
-        char            name[NAME_MAX];
+        struct stat     stat;
+        char            name[FILENAME_MAX];
         char            abspath[PATH_MAX];
-        off_t           size;
+        /*char            parentpath[PATH_MAX];*/
         unsigned int    nchld;
         unsigned int    nparents;
         unsigned short  nmlen;
@@ -55,6 +63,12 @@ typedef struct {
 } Key;
 
 enum {
+        LEVEL_PARENT = -1,
+        LEVEL_MAIN,
+        LEVEL_CHILD
+};
+
+enum {
         NAV_LEFT,
         NAV_RIGHT,
         NAV_UP,
@@ -72,17 +86,21 @@ enum {
 /* globals */
 static Entry *entrs = NULL;
 static unsigned long nfiles = 0;
-static int fsel = 0; /* focused sel */
+// change to ul
+static int msel = 0; /* main sel */
+static int psel = 0; /* parent sel */
+static int csel = 0; /* child sel */
 static int showall = 0;
+static int needredraw = 0;
 
 /* function declarations */
 static void      cursesinit(void);
 static int       entriescount(const char *);
 static Entry    *entriesget(const char *);
 static void      pathdraw(const char *);
-static void      focusdraw(const Entry *);
-static void      dirpreview(const Entry *, int, int, int);
+static void      dirpreview(const Entry *, int, int, int, int, int);
 static void      filepreview(const Entry *);
+static void      statsprint(const Entry *);
 static void      promptget(const Arg *);
 static void      nav(const Arg *);
 static void      cd(const Arg *);
@@ -90,6 +108,7 @@ static void      entsort(const Arg *);
 static void      spawn(const Arg *);
 static void      quit(const Arg *);
 static void      run(void);
+static void     *emalloc(size_t);
 static void      die(const char *, ...);
 
 #include "config.h"
@@ -98,7 +117,7 @@ static void      die(const char *, ...);
 static inline int
 entcmpnameasc(const void *lhs, const void *rhs)
 {
-        return (strcmp(((Entry *)lhs)->name, ((Entry *)rhs)->name) > 0);
+        return (strcmp(((Entry *)lhs)->name, ((Entry *)rhs)->name) < 0);
 }
 
 static inline int
@@ -146,8 +165,7 @@ entriesget(const char *path)
         Entry *dents;
         int i = 0;
         
-        if ((dents = malloc(entriescount(path) * sizeof(Entry))) == NULL)
-                return NULL;
+        dents = emalloc(entriescount(path) * sizeof(Entry));
         if ((dir = opendir(path)) == NULL)
                 return NULL;
         while ((dp = readdir(dir)) != NULL) {
@@ -161,6 +179,7 @@ entriesget(const char *path)
                         sprintf(dents[i].abspath, "%s/%s", path, dp->d_name);
                         dents[i].nchld = entriescount(dents[i].name);
                         dents[i].nparents = entriescount("..");
+                        stat(dents[i].abspath, &dents[i].stat);
                         i++;
                 }
         }
@@ -171,41 +190,65 @@ entriesget(const char *path)
 void
 pathdraw(const char *path)
 {
-        mvprintw(YMAX - 1, XMAX - 10, "%ld/%ld\n", fsel + 1, nfiles); // shouldn't be here
+        char host[HOST_NAME_MAX];
+        char user[LOGIN_NAME_MAX];
+
+        gethostname(host, HOST_NAME_MAX);
+        getlogin_r(user, LOGIN_NAME_MAX);
         attron(A_BOLD);
-        mvprintw(0, 0, "%s\n", path);
+        mvprintw(0, 0, "%s@%s:%s\n", user, host, path);
         attroff(A_BOLD);
         mvhline(1, 0, ACS_HLINE, XMAX);
 }
 
 void
-focusdraw(const Entry *dents)
+dirpreview(const Entry *dents, int n, int col, int len, int sel, int level)
 {
-        int i = 0;
-
-        for (; i < nfiles && i < YMAX; i++) {
-                if (i == fsel)
-                        attron(A_REVERSE);
-                mvprintw(i + 2, FOCUS_COL, "%s\n", dents[i].name);
-                // align numbers properly
-                if (dents[i].type == DT_DIR)
-                        mvprintw(i + 2, FOCUS_NCHLD_COL, "%12.ld\n", dents[i].nchld);
-                attroff(A_REVERSE);
-        }
-}
-
-// might merge with focusdraw
-void
-dirpreview(const Entry *dents, int n, int sel, int col)
-{
+        char buf[FILENAME_MAX];
         int i = 0;
 
         for (; i < n && i < YMAX; i++) {
                 if (i == sel)
                         attron(A_REVERSE);
-                mvprintw(i + 2, col, "%s\n", dents[i].name);
+                if (dents[i].type == DT_DIR)
+                        attron(A_BOLD);
+                sprintf(buf, "%-*s", len, dents[i].name);
+                // handle empty dir
+                mvprintw(i + 2, col, " %s \n", buf);
+                if (level == 0) {
+                        // align numbers properly
+                        if (dents[i].type == DT_DIR)
+                                mvprintw(i + 2, CHILD_COL, "%12d \n",
+                                         dents[i].nchld);
+                        else if (dents[i].type == DT_REG)
+                                mvprintw(i + 2, CHILD_COL, "%10d B \n",
+                                         dents[i].stat.st_size);
+                }
+                attroff(A_BOLD);
                 attroff(A_REVERSE);
         }
+}
+
+void
+statsprint(const Entry *entry)
+{
+        struct tm *tm;
+
+        tm = localtime(&entry->stat.st_ctime);
+        mvprintw(YMAX - 1, 0, "%c%c%c%c%c%c%c%c%c%c %dB %s",
+                 (S_ISDIR(entry->stat.st_mode)) ? 'd' : '-',
+                 entry->stat.st_mode & S_IRUSR ? 'r' : '-',
+                 entry->stat.st_mode & S_IWUSR ? 'w' : '-',
+                 entry->stat.st_mode & S_IXUSR ? 'x' : '-',
+                 entry->stat.st_mode & S_IRGRP ? 'r' : '-',
+                 entry->stat.st_mode & S_IWGRP ? 'w' : '-',
+                 entry->stat.st_mode & S_IXGRP ? 'x' : '-',
+                 entry->stat.st_mode & S_IROTH ? 'r' : '-',
+                 entry->stat.st_mode & S_IWOTH ? 'w' : '-',
+                 entry->stat.st_mode & S_IXOTH ? 'x' : '-',
+                 entry->stat.st_size, asctime(tm));
+        // align
+        mvprintw(YMAX - 1, XMAX - 10, "%ld/%ld\n", msel + 1, nfiles);
 }
 
 void
@@ -217,8 +260,12 @@ filepreview(const Entry *entry)
 
         if ((fp = fopen(entry->name, "r")) == NULL)
                 return;
-        while (fgets(buf, BUFSIZ, fp) && ln < YMAX)
-                mvprintw(ln++ + 2, 120, "%s\n", buf);
+        // replace XMAX / 2
+        while (fgets(buf, BUFSIZ, fp) && ln < YMAX) {
+                if (strlen(buf) > XMAX / 2)
+                        buf[XMAX / 2 - 2] = '\0';
+                mvprintw(ln++ + 2, CHILD_COL, "%s\n", buf);
+        }
         fclose(fp);
 }
 
@@ -251,28 +298,29 @@ nav(const Arg *arg)
                 chdir("..");
                 break;
         case NAV_RIGHT:
-                if (entrs[fsel].name != NULL) {
+                if (entrs[msel].name != NULL) {
                         // handle symlinks
-                        if (entrs[fsel].type == DT_DIR)
-                                chdir(entrs[fsel].name);
-                        /*else if (entrs[fsel].type == DT_REG)*/
+                        if (entrs[msel].type == DT_DIR)
+                                chdir(entrs[msel].name);
+                        /*else if (entrs[msel].type == DT_REG)*/
                                 /*spawn();*/
                 }
                 break;
         case NAV_UP:
-                fsel--;
+                msel--;
                 break;
         case NAV_DOWN:
-                fsel++;
+                msel++;
                 break;
         case NAV_TOP:
-                fsel = 0;
+                msel = 0;
                 break;
         case NAV_BOTTOM:
-                fsel = nfiles - 1;
+                msel = nfiles - 1;
                 break;
         case NAV_SHOWALL:
                 showall = !showall;
+                needredraw = 1;
                 break;
         }
 }
@@ -354,7 +402,7 @@ main(int argc, char *argv[])
                 erase();
 
                 curdir = getcwd(cwd, sizeof(cwd));
-                if (strcmp(curdir, prevdir) != 0) {
+                if (strcmp(curdir, prevdir) != 0 || needredraw) {
                         if (entrs != NULL)
                                 free(entrs);
                         if (parent != NULL)
@@ -366,27 +414,31 @@ main(int argc, char *argv[])
                                 continue;
                         if ((parent = entriesget("..")) == NULL)
                                 continue;
-                        /*if (entrs[fsel].type == DT_DIR)*/
-                                /*if ((child = entriesget(entrs[fsel].name)) == NULL)*/
+                        /*if (entrs[msel].type == DT_DIR)*/
+                                /*if ((child = entriesget(entrs[msel].name)) == NULL)*/
                                         /*continue;*/
                         // is this a memleak?
                         strcpy(prevdir, curdir);
+                        needredraw = 0;
                 }
 
                 SEL_CORRECT;
                 pathdraw(curdir);
-                if (strcmp(curdir, "/") != 0)
-                        dirpreview(parent, entrs[fsel].nparents, fsel, PARENT_COL);
-                focusdraw(entrs);
-                /*if (entrs[fsel].type == DT_REG)*/
-                        /*filepreview(&entrs[fsel]);*/
-                /*dirpreview(child, entrs[fsel].nchld, fsel, CHILD_COL);*/
+                /*if (strcmp(curdir, "/") != 0)*/
+                        /*dirpreview(parent, entrs[msel].nparents, PARENT_COL,*/
+                                   /*FOCUS_COL - 3, psel, LEVEL_PARENT);*/
+                dirpreview(entrs, nfiles, FOCUS_COL, CHILD_COL, msel, LEVEL_MAIN);
+                statsprint(&entrs[msel]);
+                /*dirpreview(child, entrs[msel].nchld, CHILD_COL + 2, CHILD_COL - FOCUS_COL, csel, LEVEL_CHILD);*/
+                /*if (entrs[msel].type == DT_REG)*/
+                        /*filepreview(&entrs[msel]);*/
 
                 c = getch();
                 for (i = 0; i < ARRLEN(keys); i++) {
                         // handle same key combinations
                         // and same key but without mod
                         if (c == keys[i].mod) {
+                                // may add lf and ranger style cmd printing
                                 mvaddch(YMAX - 1, 0, c);
                                 c = getch();
                         }

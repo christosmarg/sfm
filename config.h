@@ -3,7 +3,7 @@
 
 #define SHCMD(cmd) { .f = (const char*[]){"/usr/bin/sh", "-c", cmd, NULL} }
 
-//static unsigned int maxcols = 3;
+//static int nlevels = 3;
 
 static Key keys[] = {
         /* mod         key             func             arg */
@@ -21,8 +21,8 @@ static Key keys[] = {
         {  0,          'a',            nav,             {.n = NAV_SHOWALL} },
         { 'g',         'h',            cd,              {.d = "/home/christos"} },
         { 'g',         'u',            cd,              {.d = "/usr"} },
-        { 's',         'a',            entsort,         {.n = ENTSORT_NAME_ASC} },
-        { 's',         'd',            entsort,         {.n = ENTSORT_NAME_DESC} },
+        {  0,          's',            entsort,         {.n = ENTSORT_NAME_ASC} },
+        //{ 's',         'd',            entsort,         {.n = ENTSORT_NAME_DESC} },
         { 'd',         'D',            spawn,           SHCMD("rm -rf %s") },
         {  0,          ':',            promptget,       {.f = NULL} },
         {  0,          'q',            quit,            {.f = NULL} },
