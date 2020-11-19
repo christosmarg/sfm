@@ -3,7 +3,7 @@
 
 #define SHCMD(cmd) { .f = (const char*[]){"/usr/bin/sh", "-c", cmd, NULL} }
 
-//static int nlevels = 3;
+static chtype winborder = A_INVIS;
 
 static Key keys[] = {
         /* mod         key             func             arg */
@@ -18,13 +18,13 @@ static Key keys[] = {
         {  0,          'j',            nav,             {.n = NAV_DOWN} },
         { 'g',         'g',            nav,             {.n = NAV_TOP} },
         {  0,          'G',            nav,             {.n = NAV_BOTTOM} },
-        {  0,          'a',            nav,             {.n = NAV_SHOWALL} },
+        {  0,          '.',            nav,             {.n = NAV_SHOWALL} },
+        {  0,          'f',            nav,             {.n = NAV_FPREVIEW} },
         { 'g',         'h',            cd,              {.d = "/home/christos"} },
         { 'g',         'u',            cd,              {.d = "/usr"} },
         { 'd',         'D',            spawn,           SHCMD("rm -rf %s") },
         {  0,          ':',            promptget,       {.f = NULL} },
         {  0,          'q',            quit,            {.f = NULL} },
 };
-
 
 #endif /* CONFIG_H */

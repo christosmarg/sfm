@@ -1,6 +1,5 @@
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 
 #include <dirent.h>
 #include <fts.h>
@@ -13,13 +12,15 @@
 
 #include <ncurses.h>
 
-#define PATH_MAX        1024 // syslimits' PATH_MAX?
+#ifndef PATH_MAX
+#define PATH_MAX        1024
+#endif /* PATH_MAX */
+#ifndef HOST_NAME_MAX
 #define HOST_NAME_MAX   _POSIX_HOST_NAME_MAX
+#endif /* HOST_NAME_MAX */
+#ifndef LOGIN_NAME_MAX
 #define LOGIN_NAME_MAX  _POSIX_LOGIN_NAME_MAX
-
-#define PARENT_COL      0
-#define MAIN_COL        ((XMAX / 2) / 3)
-#define CHILD_COL       (XMAX / 2)
+#endif /* LOGIN_NAME_MAX */
 
 #define YMAX            (getmaxy(stdscr))
 #define XMAX            (getmaxx(stdscr))
@@ -28,9 +29,10 @@
 #define ARRLEN(x)       (sizeof(x) / sizeof(x[0]))
 #define ISDIGIT(x)      ((unsigned int)(x) - '0' <= 9)
 #define SEL_CORRECT \
-        (msel = ((msel < 0) ? 0 : (msel > nfiles - 1) ? nfiles - 1 : msel))
+        win->sel = ((win->sel < 0) ? 0 : (win->sel > win->nfiles - 1) \
+                    ? win->nfiles - 1 : win->sel);
 
-/* typedefs */
+/* type definitions */
 typedef unsigned char uchar;
 typedef unsigned short ushort;
 typedef unsigned int uint;
@@ -41,9 +43,17 @@ typedef unsigned long long ull;
 /* structs, unions and enums */
 typedef struct {
         FTSENT  *fts;
-        ulong    nchld;
-        ulong    nparents;
+// useless?
 } Entry;
+
+typedef struct {
+        WINDOW  *w;
+        Entry   *ents;
+        ulong    nfiles;
+        long     sel;
+        int      len;
+        int      id;
+} Win;
 
 typedef union {
         int n;
@@ -59,6 +69,13 @@ typedef struct {
 } Key;
 
 enum {
+        W_PARENT,
+        W_MAIN,
+        W_CHILD,
+        W_FILE,
+};
+
+enum {
         NAV_LEFT,
         NAV_RIGHT,
         NAV_UP,
@@ -66,16 +83,14 @@ enum {
         NAV_TOP,
         NAV_BOTTOM,
         NAV_SHOWALL,
+        NAV_FPREVIEW,
 };
 
 /* globals */
-static Entry *entrs = NULL;     /* main directory's entries */
-static ulong nfiles = 0;        /* number of files in directory */
-static long msel = 0;           /* main sel */
-static long psel = 0;           /* parent sel */
-static long csel = 0;           /* child sel */
+static Win *win = NULL;         /* main display */
 static uchar f_showall = 0;     /* show hidden files */
 static uchar f_redraw = 0;      /* redraw screen */
+static uchar f_fpreview = 1;    /* preview files */
 
 /* function pointers */
 static int (*sortfn)(const FTSENT *, const FTSENT *);
@@ -83,11 +98,11 @@ static int (*sortfn)(const FTSENT *, const FTSENT *);
 /* function declarations */
 static void      cursesinit(void);
 static int       entriescount(char *);
-static Entry    *entriesget(char *);
+static Entry    *entriesget(char *, ulong);
 static void      pathdraw(const char *);
-static void      dirpreview(const Entry *, int, int, int, ulong);
-static void      filepreview(const Entry *);
-static void      statsprint(const Entry *);
+static void      dirpreview(Win *);
+static void      filepreview(void);
+static void      statsprint(void);
 static void      promptget(const Arg *);
 static void      nav(const Arg *);
 static void      cd(const Arg *);
@@ -99,12 +114,6 @@ static void      die(const char *, ...);
 #include "config.h"
 
 /* function implementations */
-static inline int
-namecmp(const FTSENT *a, const FTSENT *b)
-{
-        return (strcoll(a->fts_name, b->fts_name));
-}
-
 void
 cursesinit(void)
 {
@@ -114,6 +123,13 @@ cursesinit(void)
         curs_set(0);
         keypad(stdscr, 1);
         /*scrollok(stdscr, 1);*/
+
+        win = emalloc(sizeof(Win));
+        win->ents = NULL;
+        win->sel = 0;
+        win->len = XMAX / 2;
+        win->w = newwin(YMAX - 2, win->len, 2, 0);
+        box(win->w, winborder, winborder);
 }
 
 int
@@ -130,8 +146,7 @@ entriescount(char *path)
                 fts_set(ftsp, p, FTS_SKIP);
                 chp = fts_children(ftsp, 0);
                 for (cur = chp; cur; cur = cur->fts_link) {
-                        /*if (!f_showall)*/
-                        if (cur->fts_name[0] == '.')
+                        if (!f_showall && cur->fts_name[0] == '.')
                                 continue;
                         n++;
                 }
@@ -141,33 +156,29 @@ entriescount(char *path)
 }
 
 Entry *
-entriesget(char *path)
+entriesget(char *path, ulong n)
 {
+        Entry *ents;
         FTS *ftsp;
         FTSENT *p, *chp, *cur;
-        Entry *dents;
         char *args[] = {path, NULL};
         int i = 0;
         
-        dents = emalloc(entriescount(path) * sizeof(Entry));
+        ents = emalloc(n * sizeof(Entry));
         if ((ftsp = fts_open(args, FTS_NOCHDIR, NULL)) == NULL)
                 return NULL;
         while ((p = fts_read(ftsp)) != NULL) {
                 fts_set(ftsp, p, FTS_SKIP);
                 chp = fts_children(ftsp, 0);
                 for (cur = chp; cur; cur = cur->fts_link) {
-                        /*if (!f_showall)*/
-                        if (cur->fts_name[0] == '.')
+                        if (!f_showall && cur->fts_name[0] == '.')
                                 continue;
-                        dents[i].fts = cur;
-                        /*dents[i].nchld = entriescount(dents[i].fts->fts_name);*/
+                        ents[i].fts = cur;
                         i++;
                 }
-                /* TODO: count parents only one time, as it's the same for everyone */
-                /*dents[i].nparents = entriescount("..");*/
         }
         fts_close(ftsp);
-        return dents;
+        return ents;
 }
 
 void
@@ -185,75 +196,82 @@ pathdraw(const char *path)
 }
 
 void
-dirpreview(const Entry *dents, int n, int col, int len, ulong sel)
+dirpreview(Win *win)
 {
         char buf[FILENAME_MAX];
         int i = 0;
 
-        for (; i < n && i < YMAX; i++) {
-                if (i == sel)
-                        attron(A_REVERSE);
-                if (dents[i].fts->fts_info == FTS_D)
-                        attron(A_BOLD);
-                sprintf(buf, "%-*s", len, dents[i].fts->fts_name);
-                // handle empty dir
-                mvprintw(i + 2, col, " %s \n", buf);
-                if (col == MAIN_COL) {
-                        // align numbers properly
-                        switch (dents[i].fts->fts_info) {
-                        case FTS_D:
-                                /*mvprintw(i + 2, CHILD_COL, "%12d \n",*/
-                                         /*dents[i].nchld);*/
-                                break;
-                        case FTS_F:
-                                mvprintw(i + 2, CHILD_COL, "%10d B \n",
-                                         dents[i].fts->fts_statp->st_size);
-                                break;
-                        }
+        for (; i < win->nfiles && i < YMAX; i++) {
+                if (i == win->sel)
+                        wattron(win->w, A_REVERSE);
+                if (win->ents[i].fts->fts_info == FTS_D)
+                        wattron(win->w, A_BOLD);
+                sprintf(buf, "%-*s", win->len, win->ents[i].fts->fts_name);
+                mvwprintw(win->w, i, 0, " %s ", buf);
+                switch (win->ents[i].fts->fts_info) {
+                case FTS_D:
+                        /*mvwprintw(win->w, i, win->len, "%12d ",*/
+                                  /*entriescount(win->ents[i].fts->fts_name));*/
+                        break;
+                case FTS_F:
+                        // no hardcoding please.
+                        mvwprintw(win->w, i, win->len - 13, "%10d B ",
+                                 win->ents[i].fts->fts_statp->st_size);
+                        break;
                 }
-                attroff(A_BOLD);
-                attroff(A_REVERSE);
+                wattroff(win->w, A_BOLD | A_REVERSE);
+                refresh();
+                wrefresh(win->w);
         }
 }
 
 void
-statsprint(const Entry *entry)
+statsprint(void)
 {
+        Entry *ent = &win->ents[win->sel];
         struct tm *tm;
 
-        tm = localtime(&entry->fts->fts_statp->st_ctime);
-        mvprintw(YMAX - 1, 0, "%c%c%c%c%c%c%c%c%c%c %dB %s",
-                 (S_ISDIR(entry->fts->fts_statp->st_mode)) ? 'd' : '-',
-                 entry->fts->fts_statp->st_mode & S_IRUSR ? 'r' : '-',
-                 entry->fts->fts_statp->st_mode & S_IWUSR ? 'w' : '-',
-                 entry->fts->fts_statp->st_mode & S_IXUSR ? 'x' : '-',
-                 entry->fts->fts_statp->st_mode & S_IRGRP ? 'r' : '-',
-                 entry->fts->fts_statp->st_mode & S_IWGRP ? 'w' : '-',
-                 entry->fts->fts_statp->st_mode & S_IXGRP ? 'x' : '-',
-                 entry->fts->fts_statp->st_mode & S_IROTH ? 'r' : '-',
-                 entry->fts->fts_statp->st_mode & S_IWOTH ? 'w' : '-',
-                 entry->fts->fts_statp->st_mode & S_IXOTH ? 'x' : '-',
-                 entry->fts->fts_statp->st_size, asctime(tm));
-        // align
-        mvprintw(YMAX - 1, XMAX - 10, "%ld/%ld\n", msel + 1, nfiles);
+        tm = localtime(&ent->fts->fts_statp->st_ctime);
+        mvprintw(YMAX - 1, 0, "%ld/%ld %c%c%c%c%c%c%c%c%c%c %dB %s",
+                 win->sel + 1, win->nfiles,
+                 (S_ISDIR(ent->fts->fts_statp->st_mode)) ? 'd' : '-',
+                 ent->fts->fts_statp->st_mode & S_IRUSR ? 'r' : '-',
+                 ent->fts->fts_statp->st_mode & S_IWUSR ? 'w' : '-',
+                 ent->fts->fts_statp->st_mode & S_IXUSR ? 'x' : '-',
+                 ent->fts->fts_statp->st_mode & S_IRGRP ? 'r' : '-',
+                 ent->fts->fts_statp->st_mode & S_IWGRP ? 'w' : '-',
+                 ent->fts->fts_statp->st_mode & S_IXGRP ? 'x' : '-',
+                 ent->fts->fts_statp->st_mode & S_IROTH ? 'r' : '-',
+                 ent->fts->fts_statp->st_mode & S_IWOTH ? 'w' : '-',
+                 ent->fts->fts_statp->st_mode & S_IXOTH ? 'x' : '-',
+                 ent->fts->fts_statp->st_size,
+                 asctime(tm));
 }
 
 void
-filepreview(const Entry *entry)
+filepreview(void)
 {
+        WINDOW *fw;
         FILE *fp;
+        Entry *ent;
         char buf[BUFSIZ];
+        size_t maxlen = XMAX / 2;
         int ln = 0;
 
-        /*if ((fp = fopen(entry->name, "r")) == NULL)*/
-                /*return;*/
-        // replace XMAX / 2
-        while (fgets(buf, BUFSIZ, fp) && ln < YMAX) {
-                if (strlen(buf) > XMAX / 2)
-                        buf[XMAX / 2 - 2] = '\0';
-                mvprintw(ln++ + 2, CHILD_COL, "%s\n", buf);
+        if (f_fpreview) {
+                ent = &win->ents[win->sel];
+                if ((fp = fopen(ent->fts->fts_name, "r")) == NULL)
+                        return;
+                fw = newwin(YMAX - 2, maxlen, 2, maxlen);
+                while (fgets(buf, BUFSIZ, fp) && ln < YMAX) {
+                        if (strlen(buf) > maxlen)
+                                buf[maxlen] = '\0';
+                        mvwprintw(fw, ln++, 0, "%s\n", buf);
+                }
+                fclose(fp);
+                refresh();
+                wrefresh(fw);
         }
-        fclose(fp);
 }
 
 // handle user given shell cmds
@@ -265,48 +283,40 @@ spawn(const Arg *arg)
                                                  
 void                        
 promptget(const Arg *arg)
-{                                                
-        char buf[BUFSIZ];                        
-                                                 
-        move(getmaxy(stdscr) - 1, 0);            
-        echo();                                  
-        curs_set(1);                             
-        printw(":");                             
-        getnstr(buf, BUFSIZ);                      
-        noecho();                                
-        curs_set(0);                             
+{  
 }
 
 void
 nav(const Arg *arg)
 {
+        FTSENT *ftsp = win->ents[win->sel].fts;
+
         switch (arg->n) {
         case NAV_LEFT:
                 chdir("..");
                 break;
         case NAV_RIGHT:
-                /*if (entrs[msel].name != NULL) {*/
-                        // handle symlinks
-                        /*if (entrs[msel].type == FTS_D)*/
-                                /*chdir(entrs[msel].name);*/
-                        /*else if (entrs[msel].type == DT_REG)*/
-                                /*spawn();*/
-                /*}*/
+                if (ftsp->fts_info == FTS_D)
+                        chdir(ftsp->fts_name);
                 break;
         case NAV_UP:
-                msel--;
+                win->sel--;
                 break;
         case NAV_DOWN:
-                msel++;
+                win->sel++;
                 break;
         case NAV_TOP:
-                msel = 0;
+                win->sel = 0;
                 break;
         case NAV_BOTTOM:
-                msel = nfiles - 1;
+                win->sel = win->nfiles - 1;
                 break;
         case NAV_SHOWALL:
                 f_showall = !f_showall;
+                f_redraw = 1;
+                break;
+        case NAV_FPREVIEW:
+                f_fpreview = !f_fpreview;
                 f_redraw = 1;
                 break;
         }
@@ -321,6 +331,11 @@ cd(const Arg *arg)
 void
 quit(const Arg *arg)
 {
+        if (win->w != NULL)
+                delwin(win->w);
+        if (win->ents != NULL)
+                free(win->ents);
+        free(win);
         endwin();
         exit(0);
 }
@@ -349,63 +364,43 @@ die(const char *fmt, ...)
                 perror(NULL);
         } else
                 fputc('\n', stderr);
-
         exit(EXIT_FAILURE);
 }
 
 int
 main(int argc, char *argv[])
 {
-        Entry *parent = NULL, *child = NULL;
         char cwd[PATH_MAX], *curdir, prevdir[PATH_MAX] = {0};
         int c, i;
 
-        // check for NCURSES_VERSION
         cursesinit();
         if ((curdir = getcwd(cwd, sizeof(cwd))) == NULL)
-                die("can't get cwd");
+                die("sfm: can't get cwd");
 
         for (;;) {
                 erase();
 
                 curdir = getcwd(cwd, sizeof(cwd));
                 if (strcmp(curdir, prevdir) != 0 || f_redraw) {
-                        if (entrs != NULL)
-                                free(entrs);
-                        if (parent != NULL)
-                                free(parent);
-                        /*if (child != NULL)*/
-                                /*free(child);*/
-                        nfiles = entriescount(curdir);
-                        if ((entrs = entriesget(curdir)) == NULL)
+                        if (win->ents != NULL)
+                                free(win->ents);
+                        win->nfiles = entriescount(curdir);
+                        if ((win->ents = entriesget(curdir, win->nfiles)) == NULL)
                                 continue;
-                        /*if ((parent = entriesget("..")) == NULL)*/
-                                /*continue;*/
-                        /*if (entrs[msel].type == DT_DIR)*/
-                                /*if ((child = entriesget(entrs[msel].name)) == NULL)*/
-                                        /*continue;*/
                         strcpy(prevdir, curdir);
                         f_redraw = 0;
                 }
 
                 SEL_CORRECT;
                 pathdraw(curdir);
-                /*if (strcmp(curdir, "/") != 0)*/
-                        /*dirpreview(parent, entrs[msel].nparents, PARENT_COL,*/
-                                   /*MAIN_COL - 3, psel);*/
-                dirpreview(entrs, nfiles, MAIN_COL, CHILD_COL, msel);
-                statsprint(&entrs[msel]);
-                /*dirpreview(child, entrs[msel].nchld, CHILD_COL + 2 + 12,*/
-                           /*CHILD_COL - MAIN_COL, csel);*/
-                /*if (entrs[msel].type == DT_REG)*/
-                        /*filepreview(&entrs[msel]);*/
+                dirpreview(win);
+                statsprint();
+                if (win->ents[win->sel].fts->fts_info == FTS_F)
+                        filepreview();
 
                 c = getch();
                 for (i = 0; i < ARRLEN(keys); i++) {
-                        // handle same key combinations
-                        // and same key but without mod
                         if (c == keys[i].mod) {
-                                // may add lf and ranger style cmd printing
                                 mvaddch(YMAX - 1, 0, c);
                                 c = getch();
                         }
