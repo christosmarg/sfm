@@ -1,9 +1,10 @@
-#include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #include <dirent.h>
-#include <fts.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,12 @@
 #ifndef LOGIN_NAME_MAX
 #define LOGIN_NAME_MAX  _POSIX_LOGIN_NAME_MAX
 #endif /* LOGIN_NAME_MAX */
+#ifndef DT_DIR
+#define DT_DIR          4
+#endif /* DT_DIR */
+#ifndef DT_REG
+#define DT_REG          8
+#endif /* DT_REG */
 
 #define YMAX            (getmaxy(stdscr))
 #define XMAX            (getmaxx(stdscr))
@@ -28,9 +35,9 @@
 #define MAX(x, y)       ((x) > (y) ? (x) : (y))
 #define ARRLEN(x)       (sizeof(x) / sizeof(x[0]))
 #define ISDIGIT(x)      ((unsigned int)(x) - '0' <= 9)
-#define SEL_CORRECT \
-        win->sel = ((win->sel < 0) ? 0 : (win->sel > win->nfiles - 1) \
-                    ? win->nfiles - 1 : win->sel);
+#define SEL_CORRECT                                                     \
+        win->sel = ((win->sel < 0) ? 0 : (win->sel > win->nf - 1)       \
+                    ? win->nf - 1 : win->sel);
 
 /* type definitions */
 typedef unsigned char uchar;
@@ -42,17 +49,20 @@ typedef unsigned long long ull;
 
 /* structs, unions and enums */
 typedef struct {
-        FTSENT  *fts;
-// useless?
+        struct stat      stat;
+        struct tm       *tm;
+        char            *name;
+        ushort           nlen;
+        uchar            flags;
+        uchar            selected;
 } Entry;
 
 typedef struct {
         WINDOW  *w;
         Entry   *ents;
-        ulong    nfiles;
+        ulong    nf;
         long     sel;
         int      len;
-        int      id;
 } Win;
 
 typedef union {
@@ -69,13 +79,6 @@ typedef struct {
 } Key;
 
 enum {
-        W_PARENT,
-        W_MAIN,
-        W_CHILD,
-        W_FILE,
-};
-
-enum {
         NAV_LEFT,
         NAV_RIGHT,
         NAV_UP,
@@ -84,6 +87,12 @@ enum {
         NAV_BOTTOM,
         NAV_SHOWALL,
         NAV_FPREVIEW,
+        NAV_REDRAW,
+};
+
+enum {
+        ENV_SHELL,
+        ENV_EDITOR,
 };
 
 /* globals */
@@ -92,22 +101,30 @@ static uchar f_showall = 0;     /* show hidden files */
 static uchar f_redraw = 0;      /* redraw screen */
 static uchar f_fpreview = 1;    /* preview files */
 
+static char *envs[] = {
+        [ENV_SHELL] = "SHELL",
+        [ENV_EDITOR] = "EDITOR",
+};
+
 /* function pointers */
-static int (*sortfn)(const FTSENT *, const FTSENT *);
 
 /* function declarations */
 static void      cursesinit(void);
-static int       entriescount(char *);
-static Entry    *entriesget(char *, ulong);
+static int       entcount(char *);
+static Entry    *entget(char *, ulong);
+static void      entprint(Win *);
 static void      pathdraw(const char *);
-static void      dirpreview(Win *);
-static void      filepreview(void);
 static void      statsprint(void);
-static void      promptget(const Arg *);
+static void      filepreview(void);
+static int       confirmact(const char *);
+static void      spawn(char *);
 static void      nav(const Arg *);
 static void      cd(const Arg *);
-static void      spawn(const Arg *);
+static void      run(const Arg *);
+static void      prompt(const Arg *);
+static void      select(const Arg *);
 static void      quit(const Arg *);
+static void      entcleanup(Entry *);
 static void     *emalloc(size_t);
 static void      die(const char *, ...);
 
@@ -122,65 +139,107 @@ cursesinit(void)
         cbreak();
         curs_set(0);
         keypad(stdscr, 1);
-        /*scrollok(stdscr, 1);*/
+
+        start_color();
+        init_pair(1, COLOR_CYAN, COLOR_BLACK);
 
         win = emalloc(sizeof(Win));
         win->ents = NULL;
         win->sel = 0;
-        win->len = XMAX / 2;
+        win->len = XMAX >> 1;
         win->w = newwin(YMAX - 2, win->len, 2, 0);
         box(win->w, winborder, winborder);
+        scrollok(win->w, 1);
 }
 
 int
-entriescount(char *path)
+entcount(char *path)
 {
-        FTS *ftsp;
-        FTSENT *p, *chp, *cur;
-        char *args[] = {path, NULL};
+        DIR *dir;
+        struct dirent *dent;
         int n = 0;
 
-        if ((ftsp = fts_open(args, FTS_NOCHDIR, NULL)) == NULL)
-                return 0;
-        while ((p = fts_read(ftsp)) != NULL) {
-                fts_set(ftsp, p, FTS_SKIP);
-                chp = fts_children(ftsp, 0);
-                for (cur = chp; cur; cur = cur->fts_link) {
-                        if (!f_showall && cur->fts_name[0] == '.')
-                                continue;
-                        n++;
-                }
+        if ((dir = opendir(path)) == NULL)
+                die("sfm: opendir failed"); /* TODO: handle error properly */
+        while ((dent = readdir(dir)) != NULL) {
+                if (!strcmp(dent->d_name, "..") || !strcmp(dent->d_name, "."))
+                        continue;
+                if (!f_showall && dent->d_name[0] == '.')
+                        continue;
+                n++;
+
         }
-        fts_close(ftsp);
+        (void)closedir(dir);
         return n;
 }
 
 Entry *
-entriesget(char *path, ulong n)
+entget(char *path, ulong n)
 {
+        DIR *dir;
+        struct dirent *dent;
         Entry *ents;
-        FTS *ftsp;
-        FTSENT *p, *chp, *cur;
-        char *args[] = {path, NULL};
         int i = 0;
         
         ents = emalloc(n * sizeof(Entry));
-        if ((ftsp = fts_open(args, FTS_NOCHDIR, NULL)) == NULL)
-                return NULL;
-        while ((p = fts_read(ftsp)) != NULL) {
-                fts_set(ftsp, p, FTS_SKIP);
-                chp = fts_children(ftsp, 0);
-                for (cur = chp; cur; cur = cur->fts_link) {
-                        if (!f_showall && cur->fts_name[0] == '.')
-                                continue;
-                        ents[i].fts = cur;
-                        i++;
-                }
+        if ((dir = opendir(path)) == NULL)
+                die("sfm: opendir failed");
+        while ((dent = readdir(dir)) != NULL) {
+                if (!strcmp(dent->d_name, "..") || !strcmp(dent->d_name, "."))
+                        continue;
+                if (!f_showall && dent->d_name[0] == '.')
+                        continue;
+                ents[i].nlen = dent->d_namlen;
+                ents[i].name = emalloc(ents[i].nlen + 1);
+                strcpy(ents[i].name, dent->d_name);
+                stat(ents[i].name, &ents[i].stat);
+                ents[i].tm = localtime(&ents[i].stat.st_ctime);
+                ents[i].flags |= dent->d_type;
+                ents[i].selected = 0;
+
+                i++;
+
         }
-        fts_close(ftsp);
+        (void)closedir(dir);
         return ents;
 }
 
+void
+entprint(Win *win)
+{
+        char buf[FILENAME_MAX];
+        int i = 0;
+
+        for (; i < win->nf && i < YMAX; i++) {
+                if (i == win->sel)
+                        wattron(win->w, A_REVERSE);
+                if (win->ents[i].flags & DT_DIR)
+                        wattron(win->w, A_BOLD | COLOR_PAIR(1));
+                sprintf(buf, "%-*s", win->len, win->ents[i].name);
+
+                wmove(win->w, i, 0);
+                if (win->ents[i].selected)
+                        waddch(win->w, '+');
+                wprintw(win->w, " %s ", buf);
+
+                switch (win->ents[i].flags) {
+                /*TODO: no hardcoding please.*/
+                case DT_DIR:
+                        mvwprintw(win->w, i, win->len - 13, "%12d ",
+                                  entcount(win->ents[i].name));
+                        break;
+                case DT_REG:
+                        mvwprintw(win->w, i, win->len - 15, "%12d B ",
+                                  win->ents[i].stat.st_size);
+                        break;
+                }
+                wattroff(win->w, A_BOLD | A_REVERSE | COLOR_PAIR(1));
+                refresh();
+                wrefresh(win->w);
+        }
+}
+
+/*TODO: change name?*/
 void
 pathdraw(const char *path)
 {
@@ -196,56 +255,24 @@ pathdraw(const char *path)
 }
 
 void
-dirpreview(Win *win)
-{
-        char buf[FILENAME_MAX];
-        int i = 0;
-
-        for (; i < win->nfiles && i < YMAX; i++) {
-                if (i == win->sel)
-                        wattron(win->w, A_REVERSE);
-                if (win->ents[i].fts->fts_info == FTS_D)
-                        wattron(win->w, A_BOLD);
-                sprintf(buf, "%-*s", win->len, win->ents[i].fts->fts_name);
-                mvwprintw(win->w, i, 0, " %s ", buf);
-                switch (win->ents[i].fts->fts_info) {
-                case FTS_D:
-                        /*mvwprintw(win->w, i, win->len, "%12d ",*/
-                                  /*entriescount(win->ents[i].fts->fts_name));*/
-                        break;
-                case FTS_F:
-                        // no hardcoding please.
-                        mvwprintw(win->w, i, win->len - 13, "%10d B ",
-                                 win->ents[i].fts->fts_statp->st_size);
-                        break;
-                }
-                wattroff(win->w, A_BOLD | A_REVERSE);
-                refresh();
-                wrefresh(win->w);
-        }
-}
-
-void
 statsprint(void)
 {
         Entry *ent = &win->ents[win->sel];
-        struct tm *tm;
 
-        tm = localtime(&ent->fts->fts_statp->st_ctime);
         mvprintw(YMAX - 1, 0, "%ld/%ld %c%c%c%c%c%c%c%c%c%c %dB %s",
-                 win->sel + 1, win->nfiles,
-                 (S_ISDIR(ent->fts->fts_statp->st_mode)) ? 'd' : '-',
-                 ent->fts->fts_statp->st_mode & S_IRUSR ? 'r' : '-',
-                 ent->fts->fts_statp->st_mode & S_IWUSR ? 'w' : '-',
-                 ent->fts->fts_statp->st_mode & S_IXUSR ? 'x' : '-',
-                 ent->fts->fts_statp->st_mode & S_IRGRP ? 'r' : '-',
-                 ent->fts->fts_statp->st_mode & S_IWGRP ? 'w' : '-',
-                 ent->fts->fts_statp->st_mode & S_IXGRP ? 'x' : '-',
-                 ent->fts->fts_statp->st_mode & S_IROTH ? 'r' : '-',
-                 ent->fts->fts_statp->st_mode & S_IWOTH ? 'w' : '-',
-                 ent->fts->fts_statp->st_mode & S_IXOTH ? 'x' : '-',
-                 ent->fts->fts_statp->st_size,
-                 asctime(tm));
+                 win->sel + 1, win->nf,
+                 (S_ISDIR(ent->stat.st_mode)) ? 'd' : '-',
+                 ent->stat.st_mode & S_IRUSR ? 'r' : '-',
+                 ent->stat.st_mode & S_IWUSR ? 'w' : '-',
+                 ent->stat.st_mode & S_IXUSR ? 'x' : '-',
+                 ent->stat.st_mode & S_IRGRP ? 'r' : '-',
+                 ent->stat.st_mode & S_IWGRP ? 'w' : '-',
+                 ent->stat.st_mode & S_IXGRP ? 'x' : '-',
+                 ent->stat.st_mode & S_IROTH ? 'r' : '-',
+                 ent->stat.st_mode & S_IWOTH ? 'w' : '-',
+                 ent->stat.st_mode & S_IXOTH ? 'x' : '-',
+                 ent->stat.st_size,
+                 asctime(ent->tm));
 }
 
 void
@@ -253,14 +280,13 @@ filepreview(void)
 {
         WINDOW *fw;
         FILE *fp;
-        Entry *ent;
+        Entry *ent = &win->ents[win->sel];
         char buf[BUFSIZ];
-        size_t maxlen = XMAX / 2;
+        size_t maxlen = win->len;
         int ln = 0;
 
-        if (f_fpreview) {
-                ent = &win->ents[win->sel];
-                if ((fp = fopen(ent->fts->fts_name, "r")) == NULL)
+        if (ent->flags & DT_REG) {
+                if ((fp = fopen(ent->name, "r")) == NULL)
                         return;
                 fw = newwin(YMAX - 2, maxlen, 2, maxlen);
                 while (fgets(buf, BUFSIZ, fp) && ln < YMAX) {
@@ -274,30 +300,65 @@ filepreview(void)
         }
 }
 
-// handle user given shell cmds
-void
-spawn(const Arg *arg)
+/* TODO: replace it, i don't like it. */
+int
+confirmact(const char *str)
 {
-        /*execvp(*((char **)arg->f), (char **)arg->f);*/
-}                                                
-                                                 
-void                        
-promptget(const Arg *arg)
-{  
+        char c;
+
+        move(YMAX - 1, 0);
+        clrtoeol();
+        mvprintw(YMAX - 1, 0, "execute '%s' (y/N)?", str);
+        refresh();
+        return (c = getch()) == 'y' ? 1 : 0;
 }
 
 void
+spawn(char *cmd)
+{
+        char *args[] = {getenv(envs[ENV_SHELL]), "-c", cmd, NULL};
+        struct sigaction oldsighup;
+        struct sigaction oldsigtstp;
+        pid_t pid;
+        int status;
+
+        endwin();
+
+        switch (pid = fork()) {
+        case -1:
+                die("sfm: fork failed");
+        case 0:
+                execvp(*args, args);
+                _exit(EXIT_SUCCESS);
+                break;
+        default:
+                while (wait(&status) != pid)
+                        ;
+                sigaction(SIGHUP, &oldsighup, NULL);
+                sigaction(SIGTSTP, &oldsigtstp, NULL);
+                break;
+        }
+}
+
+/*TODO: handle user given shell cmds*/
+void
 nav(const Arg *arg)
 {
-        FTSENT *ftsp = win->ents[win->sel].fts;
+        Entry *ent = &win->ents[win->sel];
+        char buf[BUFSIZ];
 
         switch (arg->n) {
         case NAV_LEFT:
+                /*TODO: andle error -1*/
                 chdir("..");
                 break;
         case NAV_RIGHT:
-                if (ftsp->fts_info == FTS_D)
-                        chdir(ftsp->fts_name);
+                if (ent->flags & DT_DIR)
+                        chdir(ent->name);
+                if (ent->flags & DT_REG) {
+                        sprintf(buf, "%s %s", "xdg-open", win->ents[win->sel].name);
+                        spawn(buf);
+                }
                 break;
         case NAV_UP:
                 win->sel--;
@@ -309,14 +370,15 @@ nav(const Arg *arg)
                 win->sel = 0;
                 break;
         case NAV_BOTTOM:
-                win->sel = win->nfiles - 1;
+                win->sel = win->nf - 1;
                 break;
-        case NAV_SHOWALL:
-                f_showall = !f_showall;
+        case NAV_SHOWALL:       /* FALLTHROUGH */
+                f_showall ^= 1;
+        case NAV_REDRAW:
                 f_redraw = 1;
                 break;
         case NAV_FPREVIEW:
-                f_fpreview = !f_fpreview;
+                f_fpreview ^= 1; 
                 f_redraw = 1;
                 break;
         }
@@ -329,15 +391,80 @@ cd(const Arg *arg)
 }
 
 void
+select(const Arg *arg)
+{
+        /* TODO: select all based on .f */
+        win->ents[win->sel].selected ^= 1;
+        win->sel++;
+}
+
+void
+run(const Arg *arg)
+{
+        /*TODO: convert spaces to \_*/
+        char buf[BUFSIZ];
+        int i = 0;
+
+        sprintf(buf, "%s", (const char *)arg->f);
+        for (; i < win->nf; i++)
+                if (win->ents[i].selected)
+                        sprintf(buf + strlen(buf), " %s ", win->ents[i].name);
+
+        if (confirmact(buf)) {
+                spawn(buf);
+                f_redraw = 1;
+        }
+}
+
+/* TODO: fix backspace */
+void
+prompt(const Arg *arg)
+{
+        char buf[BUFSIZ];
+        char in[BUFSIZ];
+        int i = 0;
+        char c;
+
+        move(YMAX - 1, 0);
+        clrtoeol();
+        addch(':');
+        refresh();
+        echo();
+        curs_set(1);
+        for (; (c = getch()) != '\n'; i++)
+                in[i] = c;
+        in[strlen(in)] = '\0';
+        curs_set(0);
+        noecho();
+        sprintf(buf, "%s", in);
+        if (confirmact(buf)) {
+                spawn(buf);
+                f_redraw = 1;
+        }
+}
+
+void
 quit(const Arg *arg)
 {
         if (win->w != NULL)
                 delwin(win->w);
-        if (win->ents != NULL)
-                free(win->ents);
+        entcleanup(win->ents);
         free(win);
         endwin();
         exit(0);
+}
+
+void
+entcleanup(Entry *ent)
+{
+        int i = 0;
+
+        if (win->ents != NULL) {
+                for (; i < win->nf; i++)
+                        if (win->ents[i].name != NULL)
+                                free(win->ents[i].name);
+                free(win->ents);
+        }
 }
 
 void *
@@ -346,7 +473,7 @@ emalloc(size_t nb)
         void *p;
 
         if ((p = malloc(nb)) == NULL)
-                die("emalloc:");
+                die("sfm: emalloc:");
         return p;
 }
 
@@ -382,10 +509,9 @@ main(int argc, char *argv[])
 
                 curdir = getcwd(cwd, sizeof(cwd));
                 if (strcmp(curdir, prevdir) != 0 || f_redraw) {
-                        if (win->ents != NULL)
-                                free(win->ents);
-                        win->nfiles = entriescount(curdir);
-                        if ((win->ents = entriesget(curdir, win->nfiles)) == NULL)
+                        entcleanup(win->ents);
+                        win->nf = entcount(curdir);
+                        if ((win->ents = entget(curdir, win->nf)) == NULL)
                                 continue;
                         strcpy(prevdir, curdir);
                         f_redraw = 0;
@@ -393,11 +519,12 @@ main(int argc, char *argv[])
 
                 SEL_CORRECT;
                 pathdraw(curdir);
-                dirpreview(win);
+                entprint(win);
                 statsprint();
-                if (win->ents[win->sel].fts->fts_info == FTS_F)
+                if (f_fpreview)
                         filepreview();
 
+                /*TODO: what the hell?*/
                 c = getch();
                 for (i = 0; i < ARRLEN(keys); i++) {
                         if (c == keys[i].mod) {
