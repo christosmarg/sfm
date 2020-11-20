@@ -51,6 +51,7 @@ typedef unsigned long long ull;
 typedef struct {
         struct stat      stat;
         struct tm       *tm;
+        char            *atime;
         char            *name;
         ushort           nlen;
         uchar            flags;
@@ -99,7 +100,7 @@ enum {
 static Win *win = NULL;         /* main display */
 static uchar f_showall = 0;     /* show hidden files */
 static uchar f_redraw = 0;      /* redraw screen */
-static uchar f_fpreview = 1;    /* preview files */
+static uchar f_fpreview = 0;    /* preview files */
 
 static char *envs[] = {
         [ENV_SHELL] = "SHELL",
@@ -149,7 +150,7 @@ cursesinit(void)
         win->len = XMAX >> 1;
         win->w = newwin(YMAX - 2, win->len, 2, 0);
         box(win->w, winborder, winborder);
-        scrollok(win->w, 1);
+        /*scrollok(win->w, 1);*/
 }
 
 int
@@ -159,8 +160,10 @@ entcount(char *path)
         struct dirent *dent;
         int n = 0;
 
+        /*TODO: handle error properly */
         if ((dir = opendir(path)) == NULL)
-                die("sfm: opendir failed"); /* TODO: handle error properly */
+                die("sfm: opendir failed");
+
         while ((dent = readdir(dir)) != NULL) {
                 if (!strcmp(dent->d_name, "..") || !strcmp(dent->d_name, "."))
                         continue;
@@ -184,16 +187,19 @@ entget(char *path, ulong n)
         ents = emalloc(n * sizeof(Entry));
         if ((dir = opendir(path)) == NULL)
                 die("sfm: opendir failed");
+
         while ((dent = readdir(dir)) != NULL) {
                 if (!strcmp(dent->d_name, "..") || !strcmp(dent->d_name, "."))
                         continue;
                 if (!f_showall && dent->d_name[0] == '.')
                         continue;
+
                 ents[i].nlen = dent->d_namlen;
                 ents[i].name = emalloc(ents[i].nlen + 1);
                 strcpy(ents[i].name, dent->d_name);
                 stat(ents[i].name, &ents[i].stat);
                 ents[i].tm = localtime(&ents[i].stat.st_ctime);
+                ents[i].atime = asctime(ents[i].tm);
                 ents[i].flags |= dent->d_type;
                 ents[i].selected = 0;
 
@@ -271,8 +277,7 @@ statsprint(void)
                  ent->stat.st_mode & S_IROTH ? 'r' : '-',
                  ent->stat.st_mode & S_IWOTH ? 'w' : '-',
                  ent->stat.st_mode & S_IXOTH ? 'x' : '-',
-                 ent->stat.st_size,
-                 asctime(ent->tm));
+                 ent->stat.st_size, ent->atime);
 }
 
 void
@@ -344,6 +349,7 @@ spawn(char *cmd)
 void
 nav(const Arg *arg)
 {
+        /*TODO: try make to fallthrough */
         Entry *ent = &win->ents[win->sel];
         char buf[BUFSIZ];
 
@@ -351,6 +357,7 @@ nav(const Arg *arg)
         case NAV_LEFT:
                 /*TODO: andle error -1*/
                 chdir("..");
+                f_redraw = 1;
                 break;
         case NAV_RIGHT:
                 if (ent->flags & DT_DIR)
@@ -359,6 +366,7 @@ nav(const Arg *arg)
                         sprintf(buf, "%s %s", "xdg-open", win->ents[win->sel].name);
                         spawn(buf);
                 }
+                f_redraw = 1;
                 break;
         case NAV_UP:
                 win->sel--;
@@ -372,13 +380,15 @@ nav(const Arg *arg)
         case NAV_BOTTOM:
                 win->sel = win->nf - 1;
                 break;
-        case NAV_SHOWALL:       /* FALLTHROUGH */
+        case NAV_SHOWALL:
                 f_showall ^= 1;
-        case NAV_REDRAW:
                 f_redraw = 1;
                 break;
         case NAV_FPREVIEW:
                 f_fpreview ^= 1; 
+                f_redraw = 1;
+                break;
+        case NAV_REDRAW:
                 f_redraw = 1;
                 break;
         }
@@ -388,6 +398,7 @@ void
 cd(const Arg *arg)
 {
         chdir(arg->d);
+        f_redraw = 1;
 }
 
 void
@@ -497,23 +508,22 @@ die(const char *fmt, ...)
 int
 main(int argc, char *argv[])
 {
-        char cwd[PATH_MAX], *curdir, prevdir[PATH_MAX] = {0};
+        char cwd[PATH_MAX] = {0}, *curdir = NULL;
         int c, i;
 
         cursesinit();
-        if ((curdir = getcwd(cwd, sizeof(cwd))) == NULL)
-                die("sfm: can't get cwd");
+        f_redraw = f_fpreview = 1;
 
         for (;;) {
                 erase();
 
-                curdir = getcwd(cwd, sizeof(cwd));
-                if (strcmp(curdir, prevdir) != 0 || f_redraw) {
+                if (f_redraw) {
+                        if ((curdir = getcwd(cwd, sizeof(cwd))) == NULL)
+                                continue; /*TODO: die? */
                         entcleanup(win->ents);
                         win->nf = entcount(curdir);
                         if ((win->ents = entget(curdir, win->nf)) == NULL)
-                                continue;
-                        strcpy(prevdir, curdir);
+                                continue; /*TODO: is this actually useful? */
                         f_redraw = 0;
                 }
 
