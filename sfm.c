@@ -14,27 +14,39 @@
 #include <ncurses.h>
 
 #ifndef PATH_MAX
-#define PATH_MAX        1024
+#define PATH_MAX 1024
 #endif /* PATH_MAX */
 #ifndef HOST_NAME_MAX
-#define HOST_NAME_MAX   _POSIX_HOST_NAME_MAX
+#define HOST_NAME_MAX  _POSIX_HOST_NAME_MAX
 #endif /* HOST_NAME_MAX */
 #ifndef LOGIN_NAME_MAX
-#define LOGIN_NAME_MAX  _POSIX_LOGIN_NAME_MAX
+#define LOGIN_NAME_MAX _POSIX_LOGIN_NAME_MAX
 #endif /* LOGIN_NAME_MAX */
+
 #ifndef DT_DIR
-#define DT_DIR          4
+#define DT_DIR 4
 #endif /* DT_DIR */
 #ifndef DT_REG
-#define DT_REG          8
+#define DT_REG 8
 #endif /* DT_REG */
 
+#ifndef ESC
+#define ESC 27
+#endif
+
+#ifndef DEL
+#define DEL 127
+#endif
+
+#define CTRL(x)         ((x) & 0x1f)
 #define YMAX            (getmaxy(stdscr))
 #define XMAX            (getmaxx(stdscr))
 #define MIN(x, y)       ((x) < (y) ? (x) : (y))
 #define MAX(x, y)       ((x) > (y) ? (x) : (y))
 #define ARRLEN(x)       (sizeof(x) / sizeof(x[0]))
 #define ISDIGIT(x)      ((unsigned int)(x) - '0' <= 9)
+#define ENTSORT(e, n)   (qsort((e), (n), sizeof(*(e)), sortfn))
+
 #define SEL_CORRECT                                                     \
         win->sel = ((win->sel < 0) ? 0 : (win->sel > win->nf - 1)       \
                     ? win->nf - 1 : win->sel);
@@ -114,10 +126,31 @@ enum {
         MSG_OPENWITH,
         MSG_RENAME,
         MSG_EXEC,
+        MSG_SORT,
         MSG_PROMPT,
 };
 
-/* globals */
+/* useful strings */
+static const char *cmds[] = {
+        [CMD_OPEN] = "xdg-open",
+        [CMD_MV] = "mv",
+};
+
+static const char *envs[] = {
+        [ENV_SHELL] = "SHELL",
+        [ENV_EDITOR] = "EDITOR",
+        [ENV_PAGER] = "PAGER",
+};
+
+static const char *msgs[] = {
+        [MSG_OPENWITH] = "open with: ",
+        [MSG_RENAME] = "rename: ",
+        [MSG_EXEC] = "execute %s (y/n)?",
+        [MSG_SORT] = "'n'ame 's'ize 'r'everse",
+        [MSG_PROMPT] = ":",
+};
+
+/* globals variables */
 static Win *win = NULL;         /* main display */
 static char *curdir = NULL;     /* current directory */
 static uchar f_showall = 0;     /* show hidden files */
@@ -125,25 +158,8 @@ static uchar f_redraw = 0;      /* redraw screen */
 static uchar f_fpreview = 0;    /* preview files */
 static uchar f_info = 0;        /* show info about entries */
 
-static char *cmds[] = {
-        [CMD_OPEN] = "xdg-open",
-        [CMD_MV] = "mv",
-};
-
-static char *envs[] = {
-        [ENV_SHELL] = "SHELL",
-        [ENV_EDITOR] = "EDITOR",
-        [ENV_PAGER] = "PAGER",
-};
-
-static char *msgs[] = {
-        [MSG_OPENWITH] = "open with: ",
-        [MSG_RENAME] = "rename: ",
-        [MSG_EXEC] = "execute %s (y/n)?",
-        [MSG_PROMPT] = ":",
-};
-
 /* function pointers */
+static int (*sortfn)(const void *x, const void *y);
 
 /* function declarations */
 static void      cursesinit(void);
@@ -160,6 +176,7 @@ static void      nav(const Arg *);
 static void      cd(const Arg *);
 static void      run(const Arg *);
 static void      builtinrun(const Arg *);
+static void      sort(const Arg *);
 static void      prompt(const Arg *);
 static void      selectitem(const Arg *);
 static void      quit(const Arg *);
@@ -170,6 +187,25 @@ static void      die(const char *, ...);
 #include "config.h"
 
 /* function implementations */
+static inline int
+sortname(const void *x, const void *y)
+{
+        return (strcmp(((Entry *)x)->name, ((Entry *)y)->name));
+}
+
+static inline int
+sortsize(const void *x, const void *y)
+{
+        return -(((Entry *)x)->stat.st_size - ((Entry *)y)->stat.st_size);
+}
+
+/* TODO fix */
+static inline int
+sortrev(const void *x, const void *y)
+{
+        return -sortfn(x, y);
+}
+
 void
 cursesinit(void)
 {
@@ -258,6 +294,7 @@ entget(char *path, ulong n)
 
         }
         (void)closedir(dir);
+        ENTSORT(ents, n);
         return ents;
 }
 
@@ -358,7 +395,8 @@ promptstr(const char *msg)
                 case KEY_BACKSPACE:     /* FALLTHROUGH */
                 case KEY_DC:            /* FALLTHROUGH */
                 case '\b':              /* FALLTHROUGH */
-                        len--;
+                        if (len > 0)
+                                len--;
                         break;
                 /*case ESC:*/
                         /*break;*/
@@ -377,7 +415,6 @@ promptstr(const char *msg)
         return str;
 }
 
-/* TODO: replace it, i don't like it. */
 int
 confirmact(const char *str)
 {
@@ -388,6 +425,7 @@ confirmact(const char *str)
         return (getch() == 'y');
 }
 
+/*TODO: make int */
 void
 spawn(char *cmd)
 {
@@ -415,7 +453,6 @@ spawn(char *cmd)
         }
 }
 
-/*TODO: handle user given shell cmds*/
 void
 nav(const Arg *arg)
 {
@@ -533,6 +570,27 @@ end:
 }
 
 void
+sort(const Arg *arg)
+{
+        move(YMAX - 1, 0);
+        clrtoeol();
+        mvprintw(YMAX - 1, 0, msgs[MSG_SORT]);
+        refresh();
+        switch (getch()) {
+        case 'n':
+                sortfn = sortname;
+                break;
+        case 's':
+                sortfn = sortsize;
+                break;
+        case 'r':
+                /*sortfn = sortrev;*/
+                break;
+        }
+        ENTSORT(win->ents, win->nf);
+}
+
+void
 prompt(const Arg *arg)
 {
         char buf[BUFSIZ];
@@ -602,6 +660,7 @@ main(int argc, char *argv[])
 
         cursesinit();
         f_redraw = 1;
+        sortfn = sortname;
 
         for (;;) {
                 erase();
@@ -623,16 +682,10 @@ main(int argc, char *argv[])
                 if (f_fpreview)
                         filepreview();
 
-                /*TODO: what the hell?*/
                 c = getch();
-                for (i = 0; i < ARRLEN(keys); i++) {
-                        if (c == keys[i].mod) {
-                                mvaddch(YMAX - 1, 0, c);
-                                c = getch();
-                        }
+                for (i = 0; i < ARRLEN(keys); i++)
                         if (c == keys[i].key)
                                 keys[i].func(&(keys[i].arg));
-                }
         }
 
         return 0;
