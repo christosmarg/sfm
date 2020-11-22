@@ -1,10 +1,7 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-#define SHCMD(cmd) { .f = (const char *)(cmd) }
-
-static int nctx = 4;                    /* number of available contexts */
-static chtype winborder = A_INVIS;      /* window border */
+#define SHCMD(cmd) { .v = (const char *)(cmd) }
 
 /*
  * when mod is set to 0, it means there's no mod
@@ -16,14 +13,21 @@ static chtype winborder = A_INVIS;      /* window border */
  * cd:          go to specified directory
  * run:         run a predefined shell command. the selected items
  *              will act as input to the command
+ * builtinrun:  runs a specific command that is already built inside
+ *              inside the file manager. The command is run on the
+ *              currently selected entry.
+                available commands:
+                1. RUN_PAGER
+                2. RUN_EDITOR
+                3. RUN_RENAME
  * prompt:      execute any shell command on the fly
- * select:      select item
+ * selectitem:  select item
  * quit:        exit program
  *
  * args:
- * n:           used for nav functions
- * d:           used for cd
- * f:           used for commands, NULL when no command is needed
+ * n:           used for arguments that need a numeric value
+ * s:           used for cd 
+ * v:           used for commands, NULL when no command is needed
  */
 static Key keys[] = {
         /* mod         key             func             arg */
@@ -40,15 +44,18 @@ static Key keys[] = {
         {  0,          'G',            nav,             {.n = NAV_BOTTOM} },
         {  0,          '.',            nav,             {.n = NAV_SHOWALL} },
         {  0,          'f',            nav,             {.n = NAV_FPREVIEW} },
-        {  0,          'r',            nav,             {.n = NAV_REDRAW} },
-        { 'g',         'u',            cd,              {.d = "/usr"} },
-        { 'g',         '@',            cd,              {.d = "/"} },
-        {  0,          '~',            cd,              {.d = "/home/christos"} },
-        { 'g',         'n',            cd,              {.d = "/mnt/christos_ntfs/christos"} },
-        {  0,          ' ',            select,          {.f = NULL} },
+        {  0,          'i',            nav,             {.n = NAV_INFO} },
+        //{  0,          'r',            nav,             {.n = NAV_REDRAW} },
+        { 'g',         'u',            cd,              {.s = "/usr"} },
+        {  0,          '~',            cd,              {.s = "/home/christos"} },
+        { 'g',         'n',            cd,              {.s = "/mnt/christos_ntfs/christos"} },
+        {  0,          ' ',            selectitem,      {.v = NULL} },
+        {  0,          'p',            builtinrun,      {.n = RUN_PAGER} },
+        {  0,          'e',            builtinrun,      {.n = RUN_EDITOR} },
+        //{  0,          'r',            builtinrun,      {.n = RUN_RENAME} },
         { 'd',         'D',            run,             SHCMD("rm -rf") },
-        {  0,          ':',            prompt,          {.f = NULL} },
-        {  0,          'q',            quit,            {.f = NULL} },
+        {  0,          ':',            prompt,          {.v = NULL} },
+        {  0,          'q',            quit,            {.v = NULL} },
 };
 
 #endif /* CONFIG_H */
