@@ -95,11 +95,12 @@ enum {
 enum {
         RUN_EDITOR,
         RUN_PAGER,
+        RUN_OPENWITH,
         RUN_RENAME,
 };
 
 enum {
-        CMD_CP,
+        CMD_OPEN,
         CMD_MV,
 };
 
@@ -107,6 +108,13 @@ enum {
         ENV_SHELL,
         ENV_EDITOR,
         ENV_PAGER,
+};
+
+enum {
+        MSG_OPENWITH,
+        MSG_RENAME,
+        MSG_EXEC,
+        MSG_PROMPT,
 };
 
 /* globals */
@@ -118,7 +126,7 @@ static uchar f_fpreview = 0;    /* preview files */
 static uchar f_info = 0;        /* show info about entries */
 
 static char *cmds[] = {
-        [CMD_CP] = "cp",
+        [CMD_OPEN] = "xdg-open",
         [CMD_MV] = "mv",
 };
 
@@ -126,6 +134,13 @@ static char *envs[] = {
         [ENV_SHELL] = "SHELL",
         [ENV_EDITOR] = "EDITOR",
         [ENV_PAGER] = "PAGER",
+};
+
+static char *msgs[] = {
+        [MSG_OPENWITH] = "open with: ",
+        [MSG_RENAME] = "rename: ",
+        [MSG_EXEC] = "execute %s (y/n)?",
+        [MSG_PROMPT] = ":",
 };
 
 /* function pointers */
@@ -138,6 +153,7 @@ static void      entprint(void);
 static void      statusbar(void);
 static void      statsget(Entry *);
 static void      filepreview(void);
+static char     *promptstr(const char *);
 static int       confirmact(const char *);
 static void      spawn(char *);
 static void      nav(const Arg *);
@@ -256,8 +272,7 @@ entprint(void)
                         attron(A_REVERSE);
 
                 move(i + 2, 0);
-                if (win->ents[i].selected)
-                        addch('+');
+                addch(win->ents[i].selected ? '+' : ' ');
 
                 attron(win->ents[i].attrs);
                 printw(" %s", win->ents[i].name);
@@ -324,15 +339,53 @@ filepreview(void)
         }
 }
 
+/* TODO: fix backspace and change name */
+char *
+promptstr(const char *msg)
+{
+        char buf[BUFSIZ], *str;
+        int len = 0, c;
+
+        move(YMAX - 1, 0);
+        clrtoeol();
+        addstr(msg);
+        refresh();
+        echo();
+        curs_set(1);
+
+        while ((c = getch()) != '\n') {
+                switch (c) {
+                case KEY_BACKSPACE:     /* FALLTHROUGH */
+                case KEY_DC:            /* FALLTHROUGH */
+                case '\b':              /* FALLTHROUGH */
+                        len--;
+                        break;
+                /*case ESC:*/
+                        /*break;*/
+                default:
+                        buf[len++] = c;
+                }
+        }
+
+        buf[len] = '\0';
+        str = emalloc(len + 1);
+        strcpy(str, buf);
+
+        curs_set(0);
+        noecho();
+
+        return str;
+}
+
 /* TODO: replace it, i don't like it. */
 int
 confirmact(const char *str)
 {
         move(YMAX - 1, 0);
         clrtoeol();
-        mvprintw(YMAX - 1, 0, "execute '%s' (y/N)?", str);
+        mvprintw(YMAX - 1, 0, msgs[MSG_EXEC], str);
         refresh();
-        return getch() == 'y' ? 1 : 0;
+        return (getch() == 'y');
 }
 
 void
@@ -380,7 +433,8 @@ nav(const Arg *arg)
                 if (ent->flags & DT_DIR)
                         chdir(ent->name);
                 if (ent->flags & DT_REG) {
-                        sprintf(buf, "%s %s", "xdg-open", win->ents[win->sel].name);
+                        sprintf(buf, "%s %s", cmds[CMD_OPEN],
+                                win->ents[win->sel].name);
                         spawn(buf);
                 }
                 f_redraw = 1;
@@ -460,38 +514,30 @@ builtinrun(const Arg *arg)
         case RUN_PAGER:
                 prog = getenv(envs[ENV_PAGER]);
                 break;
+        case RUN_OPENWITH:
+                prog = promptstr(msgs[MSG_OPENWITH]);
+                break;
         case RUN_RENAME:
-                /*TODO: implement */
+                sprintf(buf, "%s %s %s", cmds[CMD_MV],
+                        win->ents[win->sel].name,
+                        promptstr(msgs[MSG_RENAME]));
+                goto end; /* A GOTO! */
         default:
                 return;
         }
         sprintf(buf, "%s %s", prog, win->ents[win->sel].name);
+end:
         spawn(buf);
         /*free(prog);*/
         f_redraw = 1;
 }
 
-/* TODO: fix backspace */
 void
 prompt(const Arg *arg)
 {
         char buf[BUFSIZ];
-        char in[BUFSIZ];
-        int i = 0;
-        char c;
 
-        move(YMAX - 1, 0);
-        clrtoeol();
-        addch(':');
-        refresh();
-        echo();
-        curs_set(1);
-        for (; (c = getch()) != '\n'; i++)
-                in[i] = c;
-        in[strlen(in) - 1] = '\0';
-        curs_set(0);
-        noecho();
-        sprintf(buf, "%s", in);
+        sprintf(buf, "%s", promptstr(msgs[MSG_PROMPT]));
         if (confirmact(buf)) {
                 spawn(buf);
                 f_redraw = 1;

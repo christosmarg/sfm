@@ -10,18 +10,35 @@
  *
  * available functions:
  * nav:         handles navigation
+ *              available flags:
+ *              1. NAV_LEFT
+ *              2. NAV_RIGHT
+ *              3. NAV_UP
+ *              4. NAV_DOWN
+ *              5. NAV_TOP
+ *              6. NAV_BOTTOM
+ *              7. NAV_SHOWALL
+ *              8. NAV_FPREVIEW
+ *              9. NAV_INFO
+ *
  * cd:          go to specified directory
+ *
  * run:         run a predefined shell command. the selected items
  *              will act as input to the command
+ *
  * builtinrun:  runs a specific command that is already built inside
  *              inside the file manager. The command is run on the
  *              currently selected entry.
-                available commands:
-                1. RUN_PAGER
-                2. RUN_EDITOR
-                3. RUN_RENAME
+ *              available commands:
+ *              1. RUN_PAGER
+ *              2. RUN_EDITOR
+ *              3. RUN_OPENWITH
+ *              4. RUN_RENAME
+ *
  * prompt:      execute any shell command on the fly
+ *
  * selectitem:  select item
+ *
  * quit:        exit program
  *
  * args:
@@ -52,8 +69,9 @@ static Key keys[] = {
         {  0,          ' ',            selectitem,      {.v = NULL} },
         {  0,          'p',            builtinrun,      {.n = RUN_PAGER} },
         {  0,          'e',            builtinrun,      {.n = RUN_EDITOR} },
-        //{  0,          'r',            builtinrun,      {.n = RUN_RENAME} },
-        { 'd',         'D',            run,             SHCMD("rm -rf") },
+        {  0,          'o',            builtinrun,      {.n = RUN_OPENWITH} },
+        {  0,          'r',            builtinrun,      {.n = RUN_RENAME} },
+        {  0,          'x',            run,             SHCMD("rm -rf") },
         {  0,          ':',            prompt,          {.v = NULL} },
         {  0,          'q',            quit,            {.v = NULL} },
 };
