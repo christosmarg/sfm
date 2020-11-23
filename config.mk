@@ -12,7 +12,7 @@ INCS = -Iinclude
 LIBS = -Llib -lncurses # add ncursesw
 
 # flags
-CPPFLAGS = -D_DEFAULT_SOURCE -D_BSD_SOURCE -D_POSIX_C_SOURCE=200809L \
+CPPFLAGS = -D_DEFAULT_SOURCE -D_BSD_SOURCE -D_XOPEN_SOURCE=600 -D_POSIX_C_SOURCE=200809L \
 	   -DVERSION=\"${VERSION}\"
 CFLAGS = -std=c99 -pedantic -Wall -Wno-deprecated-declarations \
 	 -O3 ${INCS} ${CPPFLAGS}

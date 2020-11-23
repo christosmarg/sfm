@@ -32,11 +32,12 @@
 
 #ifndef ESC
 #define ESC 27
-#endif
-
+#endif /* ESC */
 #ifndef DEL
 #define DEL 127
-#endif
+#endif /* DEL */
+
+#define DELAY_MS 350000
 
 #define CTRL(x)         ((x) & 0x1f)
 #define YMAX            (getmaxy(stdscr))
@@ -76,6 +77,7 @@ typedef struct {
         Entry   *ents;
         ulong    nf;
         long     sel;
+        long     nsel;
 } Win;
 
 typedef union {
@@ -128,6 +130,7 @@ enum {
         MSG_EXEC,
         MSG_SORT,
         MSG_PROMPT,
+        MSG_FAIL,
 };
 
 /* useful strings */
@@ -145,9 +148,10 @@ static const char *envs[] = {
 static const char *msgs[] = {
         [MSG_OPENWITH] = "open with: ",
         [MSG_RENAME] = "rename: ",
-        [MSG_EXEC] = "execute %s (y/n)?",
+        [MSG_EXEC] = "execute '%s' (y/n)?",
         [MSG_SORT] = "'n'ame 's'ize 'r'everse",
         [MSG_PROMPT] = ":",
+        [MSG_FAIL] = "action failed"
 };
 
 /* globals variables */
@@ -169,9 +173,10 @@ static void      entprint(void);
 static void      statusbar(void);
 static void      statsget(Entry *);
 static void      filepreview(void);
+static void      notify(int, const char *);
 static char     *promptstr(const char *);
 static int       confirmact(const char *);
-static void      spawn(char *);
+static int       spawn(char *);
 static void      nav(const Arg *);
 static void      cd(const Arg *);
 static void      run(const Arg *);
@@ -181,6 +186,9 @@ static void      prompt(const Arg *);
 static void      selectitem(const Arg *);
 static void      quit(const Arg *);
 static void      entcleanup(Entry *);
+static void      escape(char *, const char *);
+static void      xdelay(useconds_t);
+static void      echdir(const char *);
 static void     *emalloc(size_t);
 static void      die(const char *, ...);
 
@@ -222,7 +230,7 @@ cursesinit(void)
 
         win = emalloc(sizeof(Win));
         win->ents = NULL;
-        win->sel = win->nf = 0;
+        win->sel = win->nsel = win->nf = 0;
 }
 
 int
@@ -266,7 +274,7 @@ entget(char *path, ulong n)
                 if (!f_showall && dent->d_name[0] == '.')
                         continue;
 
-                /*ents[i].nlen = dent->d_namlen;*/
+                /* TODO: keep inode */
                 ents[i].nlen = strlen(dent->d_name);
                 ents[i].name = emalloc(ents[i].nlen + 1);
                 strcpy(ents[i].name, dent->d_name);
@@ -376,6 +384,24 @@ filepreview(void)
         }
 }
 
+void
+notify(int flag, const char *str)
+{
+        move(YMAX - 1, 0);
+        clrtoeol();
+        switch (flag) {
+        case MSG_EXEC:
+                printw(msgs[MSG_EXEC], str);
+                break;
+        case MSG_FAIL: /* FALLTHROUGH */
+        case MSG_SORT: /* FALLTHROUGH */
+                addstr(msgs[flag]);
+                break;
+        default:
+                addstr(str);
+        }
+}
+
 /* TODO: fix backspace and change name */
 char *
 promptstr(const char *msg)
@@ -383,10 +409,7 @@ promptstr(const char *msg)
         char buf[BUFSIZ], *str;
         int len = 0, c;
 
-        move(YMAX - 1, 0);
-        clrtoeol();
-        addstr(msg);
-        refresh();
+        notify(-1, msg);
         echo();
         curs_set(1);
 
@@ -398,8 +421,8 @@ promptstr(const char *msg)
                         if (len > 0)
                                 len--;
                         break;
-                /*case ESC:*/
-                        /*break;*/
+                case ESC:
+                        return NULL;
                 default:
                         buf[len++] = c;
                 }
@@ -418,15 +441,11 @@ promptstr(const char *msg)
 int
 confirmact(const char *str)
 {
-        move(YMAX - 1, 0);
-        clrtoeol();
-        mvprintw(YMAX - 1, 0, msgs[MSG_EXEC], str);
-        refresh();
+        notify(MSG_EXEC, str);
         return (getch() == 'y');
 }
 
-/*TODO: make int */
-void
+int
 spawn(char *cmd)
 {
         char *args[] = {getenv(envs[ENV_SHELL]), "-c", cmd, NULL};
@@ -439,7 +458,7 @@ spawn(char *cmd)
 
         switch (pid = fork()) {
         case -1:
-                die("sfm: fork failed");
+                return 1;
         case 0:
                 execvp(*args, args);
                 _exit(EXIT_SUCCESS);
@@ -451,6 +470,7 @@ spawn(char *cmd)
                 sigaction(SIGTSTP, &oldsigtstp, NULL);
                 break;
         }
+        return 0;
 }
 
 void
@@ -462,17 +482,18 @@ nav(const Arg *arg)
 
         switch (arg->n) {
         case NAV_LEFT:
-                /*TODO: andle error -1*/
-                chdir("..");
+                echdir("..");
                 f_redraw = 1;
                 break;
         case NAV_RIGHT:
                 if (ent->flags & DT_DIR)
-                        chdir(ent->name);
+                        echdir(ent->name);
+
                 if (ent->flags & DT_REG) {
                         sprintf(buf, "%s %s", cmds[CMD_OPEN],
                                 win->ents[win->sel].name);
-                        spawn(buf);
+                        if (!spawn(buf))
+                                notify(MSG_FAIL, NULL);
                 }
                 f_redraw = 1;
                 break;
@@ -509,28 +530,42 @@ nav(const Arg *arg)
 void
 cd(const Arg *arg)
 {
-        chdir(arg->s);
+        echdir(arg->s);
         f_redraw = 1;
 }
 
 void
 selectitem(const Arg *arg)
 {
-        /* TODO: select all based on .f */
-        win->ents[win->sel++].selected ^= 1;
+        win->ents[win->sel].selected ^= 1;
+        if (win->ents[win->sel].selected)
+                win->nsel++;
+        else
+                win->nsel--;
+        win->sel++;
 }
 
 void
 run(const Arg *arg)
 {
-        /*TODO: convert spaces to \_*/
         char buf[BUFSIZ];
+        char tmp[BUFSIZ];
         int i = 0;
 
         sprintf(buf, "%s", (const char *)arg->v);
-        for (; i < win->nf; i++)
-                if (win->ents[i].selected)
-                        sprintf(buf + strlen(buf), " %s ", win->ents[i].name);
+
+        /*TODO: make prettier */
+        if (win->nsel > 0) {
+                for (; i < win->nf; i++) {
+                        if (win->ents[i].selected) {
+                                escape(tmp, win->ents[i].name);
+                                sprintf(buf + strlen(buf), " %s ", tmp);
+                        }
+                }
+        } else {
+                escape(tmp, win->ents[win->sel].name);
+                sprintf(buf + strlen(buf), " %s ", tmp);
+        }
 
         if (confirmact(buf)) {
                 spawn(buf);
@@ -542,7 +577,11 @@ void
 builtinrun(const Arg *arg)
 {
         char buf[BUFSIZ];
+        char tmp[512];
         char *prog = NULL;
+
+        /*TODO: better implementation */
+        escape(tmp, win->ents[win->sel].name);
 
         switch (arg->n) {
         case RUN_EDITOR:
@@ -552,17 +591,19 @@ builtinrun(const Arg *arg)
                 prog = getenv(envs[ENV_PAGER]);
                 break;
         case RUN_OPENWITH:
-                prog = promptstr(msgs[MSG_OPENWITH]);
+                if ((prog = promptstr(msgs[MSG_OPENWITH])) == NULL)
+                        return;
                 break;
         case RUN_RENAME:
-                sprintf(buf, "%s %s %s", cmds[CMD_MV],
-                        win->ents[win->sel].name,
+                /* TODO: check for NULL here too */
+                sprintf(buf, "%s %s %s", cmds[CMD_MV], tmp,
                         promptstr(msgs[MSG_RENAME]));
                 goto end; /* A GOTO! */
         default:
                 return;
         }
-        sprintf(buf, "%s %s", prog, win->ents[win->sel].name);
+
+        sprintf(buf, "%s %s", prog, tmp);
 end:
         spawn(buf);
         /*free(prog);*/
@@ -572,10 +613,8 @@ end:
 void
 sort(const Arg *arg)
 {
-        move(YMAX - 1, 0);
-        clrtoeol();
-        mvprintw(YMAX - 1, 0, msgs[MSG_SORT]);
-        refresh();
+        notify(MSG_SORT, NULL);
+
         switch (getch()) {
         case 'n':
                 sortfn = sortname;
@@ -621,6 +660,39 @@ entcleanup(Entry *ent)
                         if (win->ents[i].name != NULL)
                                 free(win->ents[i].name);
                 free(win->ents);
+        }
+}
+
+void
+escape(char *buf, const char *str)
+{
+        int i = 0, pos = 0;
+
+        for (; i < strlen(str); i++) {
+                switch (str[i]) {
+                case ' ': /* FALLTHROUGH */
+                case '(': /* FALLTHROUGH */
+                case ')': /* FALLTHROUGH */
+                        buf[pos++] = '\\';
+                }
+                buf[pos++] = str[i];
+        }
+        buf[pos] = '\0';
+}
+
+void
+xdelay(useconds_t delay)
+{
+        refresh();
+        usleep(delay);
+}
+
+void
+echdir(const char *path)
+{
+        if (chdir(path) != 0) {
+                notify(MSG_FAIL, NULL);
+                xdelay(DELAY_MS << 2);
         }
 }
 
@@ -682,6 +754,7 @@ main(int argc, char *argv[])
                 if (f_fpreview)
                         filepreview();
 
+                /*TODO: signal/timeout */
                 c = getch();
                 for (i = 0; i < ARRLEN(keys); i++)
                         if (c == keys[i].key)
