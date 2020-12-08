@@ -1,3 +1,4 @@
+/* See LICENSE file for copyright and license details. */
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -133,38 +134,6 @@ enum {
         MSG_FAIL,
 };
 
-/* useful strings */
-static const char *cmds[] = {
-        [CMD_OPEN] = "xdg-open",
-        [CMD_MV] = "mv",
-};
-
-static const char *envs[] = {
-        [ENV_SHELL] = "SHELL",
-        [ENV_EDITOR] = "EDITOR",
-        [ENV_PAGER] = "PAGER",
-};
-
-static const char *msgs[] = {
-        [MSG_OPENWITH] = "open with: ",
-        [MSG_RENAME] = "rename: ",
-        [MSG_EXEC] = "execute '%s' (y/n)?",
-        [MSG_SORT] = "'n'ame 's'ize 'r'everse",
-        [MSG_PROMPT] = ":",
-        [MSG_FAIL] = "action failed"
-};
-
-/* globals variables */
-static Win *win = NULL;         /* main display */
-static char *curdir = NULL;     /* current directory */
-static uchar f_showall = 0;     /* show hidden files */
-static uchar f_redraw = 0;      /* redraw screen */
-static uchar f_fpreview = 0;    /* preview files */
-static uchar f_info = 0;        /* show info about entries */
-
-/* function pointers */
-static int (*sortfn)(const void *x, const void *y);
-
 /* function declarations */
 static void      cursesinit(void);
 static int       entcount(char *);
@@ -192,26 +161,68 @@ static void      echdir(const char *);
 static void     *emalloc(size_t);
 static void      die(const char *, ...);
 
+/* useful strings */
+static const char *cmds[] = {
+        [CMD_OPEN] = "xdg-open",
+        [CMD_MV] = "mv",
+};
+
+static const char *envs[] = {
+        [ENV_SHELL] = "SHELL",
+        [ENV_EDITOR] = "EDITOR",
+        [ENV_PAGER] = "PAGER",
+};
+
+static const char *msgs[] = {
+        [MSG_OPENWITH] = "open with: ",
+        [MSG_RENAME] = "rename: ",
+        [MSG_EXEC] = "execute '%s' (y/N)?",
+        [MSG_SORT] = "'n'ame 's'ize 'r'everse",
+        [MSG_PROMPT] = ":",
+        [MSG_FAIL] = "action failed"
+};
+
+/* globals variables */
+static Win *win = NULL;         /* main display */
+static char *curdir = NULL;     /* current directory */
+
+/* flags */
+static uchar f_showall = 0;     /* show hidden files */
+static uchar f_redraw = 0;      /* redraw screen */
+static uchar f_fpreview = 0;    /* preview files */
+static uchar f_info = 0;        /* show info about entries */
+static uchar f_noconfirm = 0;   /* exec without confirmation */
+static uchar f_namesort = 0;    /* sort entries by name */
+static uchar f_sizesort = 0;    /* sort entries by size */
+static uchar f_revsort = 0;     /* reverse current sort function */
+
+static int (*sortfn)(const void *x, const void *y);
+
 #include "config.h"
 
 /* function implementations */
 static inline int
-sortname(const void *x, const void *y)
+namecmp(const void *x, const void *y)
 {
         return (strcmp(((Entry *)x)->name, ((Entry *)y)->name));
 }
 
 static inline int
-sortsize(const void *x, const void *y)
+revnamecmp(const void *x, const void *y)
+{
+        return -namecmp(x, y);
+}
+
+static inline int
+sizecmp(const void *x, const void *y)
 {
         return -(((Entry *)x)->stat.st_size - ((Entry *)y)->stat.st_size);
 }
 
-/* TODO fix */
 static inline int
-sortrev(const void *x, const void *y)
+revsizecmp(const void *x, const void *y)
 {
-        return -sortfn(x, y);
+        return -sizecmp(x, y);
 }
 
 void
@@ -219,6 +230,7 @@ cursesinit(void)
 {
         if (!initscr())
                 die("sfm: initscr failed");
+
         noecho();
         cbreak();
         curs_set(0);
@@ -274,7 +286,6 @@ entget(char *path, ulong n)
                 if (!f_showall && dent->d_name[0] == '.')
                         continue;
 
-                /* TODO: keep inode */
                 ents[i].nlen = strlen(dent->d_name);
                 ents[i].name = emalloc(ents[i].nlen + 1);
                 strcpy(ents[i].name, dent->d_name);
@@ -313,11 +324,11 @@ entprint(void)
         int i = 0;
 
         for (; i < win->nf && i < YMAX; i++) {
-                if (i == win->sel)
-                        attron(A_REVERSE);
-
                 move(i + 2, 0);
                 addch(win->ents[i].selected ? '+' : ' ');
+
+                if (i == win->sel)
+                        attron(A_REVERSE);
 
                 attron(win->ents[i].attrs);
                 printw(" %s", win->ents[i].name);
@@ -421,6 +432,7 @@ promptstr(const char *msg)
                         if (len > 0)
                                 len--;
                         break;
+                /* FIXME: why is this slow? */
                 case ESC:
                         return NULL;
                 default:
@@ -441,6 +453,8 @@ promptstr(const char *msg)
 int
 confirmact(const char *str)
 {
+        if (f_noconfirm)
+                return 1;
         notify(MSG_EXEC, str);
         return (getch() == 'y');
 }
@@ -454,7 +468,6 @@ spawn(char *cmd)
         pid_t pid;
         int status;
 
-        endwin();
 
         switch (pid = fork()) {
         case -1:
@@ -464,6 +477,7 @@ spawn(char *cmd)
                 _exit(EXIT_SUCCESS);
                 break;
         default:
+                endwin();
                 while (wait(&status) != pid)
                         ;
                 sigaction(SIGHUP, &oldsighup, NULL);
@@ -538,11 +552,10 @@ void
 selectitem(const Arg *arg)
 {
         win->ents[win->sel].selected ^= 1;
-        if (win->ents[win->sel].selected)
+        if (win->ents[win->sel++].selected)
                 win->nsel++;
         else
                 win->nsel--;
-        win->sel++;
 }
 
 void
@@ -576,37 +589,31 @@ run(const Arg *arg)
 void
 builtinrun(const Arg *arg)
 {
-        char buf[BUFSIZ];
-        char tmp[512];
-        char *prog = NULL;
-
-        /*TODO: better implementation */
-        escape(tmp, win->ents[win->sel].name);
+        Arg prog;
 
         switch (arg->n) {
         case RUN_EDITOR:
-                prog = getenv(envs[ENV_EDITOR]);
+                prog.s = getenv(envs[ENV_EDITOR]);
                 break;
         case RUN_PAGER:
-                prog = getenv(envs[ENV_PAGER]);
+                prog.s = getenv(envs[ENV_PAGER]);
                 break;
         case RUN_OPENWITH:
-                if ((prog = promptstr(msgs[MSG_OPENWITH])) == NULL)
+                if ((prog.s = promptstr(msgs[MSG_OPENWITH])) == NULL)
                         return;
                 break;
         case RUN_RENAME:
-                /* TODO: check for NULL here too */
-                sprintf(buf, "%s %s %s", cmds[CMD_MV], tmp,
-                        promptstr(msgs[MSG_RENAME]));
-                goto end; /* A GOTO! */
+                /* FIXME */
+                /*sprintf(prog.s, "%s %s %s", cmds[CMD_MV], tmp,*/
+                        /*promptstr(msgs[MSG_RENAME]));*/
+                return;
+                break;
         default:
                 return;
         }
 
-        sprintf(buf, "%s %s", prog, tmp);
-end:
-        spawn(buf);
-        /*free(prog);*/
+        f_noconfirm = 1;
+        run(&prog);
         f_redraw = 1;
 }
 
@@ -614,16 +621,20 @@ void
 sort(const Arg *arg)
 {
         notify(MSG_SORT, NULL);
-
         switch (getch()) {
         case 'n':
-                sortfn = sortname;
+                f_namesort = 1;
+                f_sizesort = 0;
+                sortfn = f_revsort ? namecmp : revnamecmp;
                 break;
         case 's':
-                sortfn = sortsize;
+                f_sizesort = 1;
+                f_namesort = 0;
+                sortfn = f_revsort ? sizecmp : revsizecmp;
                 break;
         case 'r':
-                /*sortfn = sortrev;*/
+                /* FIXME: what the fuck? make it choose a function now */
+                f_revsort ^= 1;
                 break;
         }
         ENTSORT(win->ents, win->nf);
@@ -666,18 +677,17 @@ entcleanup(Entry *ent)
 void
 escape(char *buf, const char *str)
 {
-        int i = 0, pos = 0;
-
-        for (; i < strlen(str); i++) {
-                switch (str[i]) {
-                case ' ': /* FALLTHROUGH */
-                case '(': /* FALLTHROUGH */
-                case ')': /* FALLTHROUGH */
-                        buf[pos++] = '\\';
+        for (; *str; str++) {
+                switch (*str) {
+                case ' ':  /* FALLTHROUGH */
+                case '\'': /* FALLTHROUGH */
+                case '(':  /* FALLTHROUGH */
+                case ')':  /* FALLTHROUGH */
+                        *buf++ = '\\';
                 }
-                buf[pos++] = str[i];
+                *buf++ = *str;
         }
-        buf[pos] = '\0';
+        *buf = '\0';
 }
 
 void
@@ -732,7 +742,8 @@ main(int argc, char *argv[])
 
         cursesinit();
         f_redraw = 1;
-        sortfn = sortname;
+        f_namesort = 1;
+        sortfn = namecmp;
 
         for (;;) {
                 erase();

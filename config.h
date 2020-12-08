@@ -1,7 +1,9 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-#define SHCMD(cmd) { .v = (const char *)(cmd) }
+/* TODO: useless? */
+#define CD(dir) {.s = (dir)}
+#define SHCMD(cmd) {.s = (cmd)}
 
 /*
  * when mod is set to 0, it means there's no mod
@@ -63,8 +65,8 @@ static Key keys[] = {
         {  0,          'f',            nav,             {.n = NAV_FPREVIEW} },
         {  0,          'i',            nav,             {.n = NAV_INFO} },
         {  0,          CTRL('r'),      nav,             {.n = NAV_REDRAW} },
-        {  0,          '~',            cd,              {.s = "/home/christos"} },
-        {  0,          CTRL('n'),      cd,              {.s = "/mnt/christos_ntfs/christos"} },
+        {  0,          '~',            cd,              CD("/home/christos") },
+        {  0,          CTRL('n'),      cd,              CD("/mnt/christos_ntfs/christos") },
         {  0,          ' ',            selectitem,      {.v = NULL} },
         {  0,          'p',            builtinrun,      {.n = RUN_PAGER} },
         {  0,          'e',            builtinrun,      {.n = RUN_EDITOR} },
