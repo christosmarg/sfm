@@ -5,6 +5,10 @@
 #define CD(dir) {.s = (dir)}
 #define SHCMD(cmd) {.s = (cmd)}
 
+//static int dircolor = CYAN;
+//static int filecolor = GREEN;
+//static int linkcolor = YELLOW;
+
 /*
  * when mod is set to 0, it means there's no mod
  *
@@ -19,9 +23,11 @@
  *              4. NAV_DOWN
  *              5. NAV_TOP
  *              6. NAV_BOTTOM
- *              7. NAV_SHOWALL
- *              8. NAV_FPREVIEW
+ *              7. NAV_SELECT
+ *              8. NAV_SHOWALL
  *              9. NAV_INFO
+ *              10. NAV_REDRAW
+ *              11. NAV_EXIT
  *
  * cd:          go to specified directory
  *
@@ -41,8 +47,6 @@
  *
  * selectitem:  select item
  *
- * quit:        exit program
- *
  * args:
  * n:           used for arguments that need a numeric value
  * s:           used for cd 
@@ -61,21 +65,22 @@ static Key keys[] = {
         {  0,          'j',            nav,             {.n = NAV_DOWN} },
         {  0,          'g',            nav,             {.n = NAV_TOP} },
         {  0,          'G',            nav,             {.n = NAV_BOTTOM} },
+        {  0,          ' ',            nav,             {.n = NAV_SELECT} },
         {  0,          '.',            nav,             {.n = NAV_SHOWALL} },
-        {  0,          'f',            nav,             {.n = NAV_FPREVIEW} },
         {  0,          'i',            nav,             {.n = NAV_INFO} },
         {  0,          CTRL('r'),      nav,             {.n = NAV_REDRAW} },
+        {  0,          'q',            nav,             {.n = NAV_EXIT} },
         {  0,          '~',            cd,              CD("/home/christos") },
         {  0,          CTRL('n'),      cd,              CD("/mnt/christos_ntfs/christos") },
-        {  0,          ' ',            selectitem,      {.v = NULL} },
+        /* TODO: get rid of builtinrun */
         {  0,          'p',            builtinrun,      {.n = RUN_PAGER} },
         {  0,          'e',            builtinrun,      {.n = RUN_EDITOR} },
         {  0,          'o',            builtinrun,      {.n = RUN_OPENWITH} },
         {  0,          'r',            builtinrun,      {.n = RUN_RENAME} },
         {  0,          'x',            run,             SHCMD("rm -rf") },
+        {  0,          'w',            run,             SHCMD("mpv") },
         {  0,          's',            sort,            {.v = NULL} },
         {  0,          ':',            prompt,          {.v = NULL} },
-        {  0,          'q',            quit,            {.v = NULL} },
 };
 
 #endif /* CONFIG_H */

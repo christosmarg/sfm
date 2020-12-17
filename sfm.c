@@ -30,6 +30,9 @@
 #ifndef DT_REG
 #define DT_REG 8
 #endif /* DT_REG */
+#ifndef DT_LNK
+#define DT_LNK 10
+#endif /* DT_LNK */
 
 #ifndef ESC
 #define ESC 27
@@ -50,8 +53,8 @@
 #define ENTSORT(e, n)   (qsort((e), (n), sizeof(*(e)), sortfn))
 
 #define SEL_CORRECT                                                     \
-        win->sel = ((win->sel < 0) ? 0 : (win->sel > win->nf - 1)       \
-                    ? win->nf - 1 : win->sel);
+        win->sel = ((win->sel < 0) ? 0 : (win->sel > win->nents - 1)    \
+                    ? win->nents - 1 : win->sel);
 
 /* type definitions */
 typedef unsigned char uchar;
@@ -75,10 +78,10 @@ typedef struct {
 } Entry;
 
 typedef struct {
-        Entry   *ents;
-        ulong    nf;
-        long     sel;
-        long     nsel;
+        Entry           *ents;
+        ulong            nents;
+        long             sel;
+        long             nsel;
 } Win;
 
 typedef union {
@@ -101,10 +104,11 @@ enum {
         NAV_DOWN,
         NAV_TOP,
         NAV_BOTTOM,
+        NAV_SELECT,
         NAV_SHOWALL,
-        NAV_FPREVIEW,
         NAV_INFO,
         NAV_REDRAW,
+        NAV_EXIT,
 };
 
 enum {
@@ -136,12 +140,9 @@ enum {
 
 /* function declarations */
 static void      cursesinit(void);
-static int       entcount(char *);
+static ulong     entcount(char *);
 static Entry    *entget(char *, ulong);
 static void      entprint(void);
-static void      statusbar(void);
-static void      statsget(Entry *);
-static void      filepreview(void);
 static void      notify(int, const char *);
 static char     *promptstr(const char *);
 static int       confirmact(const char *);
@@ -152,14 +153,14 @@ static void      run(const Arg *);
 static void      builtinrun(const Arg *);
 static void      sort(const Arg *);
 static void      prompt(const Arg *);
-static void      selectitem(const Arg *);
-static void      quit(const Arg *);
 static void      entcleanup(Entry *);
 static void      escape(char *, const char *);
 static void      xdelay(useconds_t);
 static void      echdir(const char *);
 static void     *emalloc(size_t);
 static void      die(const char *, ...);
+static void      sfmrun(void);
+static void      cleanup(void);
 
 /* useful strings */
 static const char *cmds[] = {
@@ -189,12 +190,12 @@ static char *curdir = NULL;     /* current directory */
 /* flags */
 static uchar f_showall = 0;     /* show hidden files */
 static uchar f_redraw = 0;      /* redraw screen */
-static uchar f_fpreview = 0;    /* preview files */
 static uchar f_info = 0;        /* show info about entries */
 static uchar f_noconfirm = 0;   /* exec without confirmation */
 static uchar f_namesort = 0;    /* sort entries by name */
 static uchar f_sizesort = 0;    /* sort entries by size */
 static uchar f_revsort = 0;     /* reverse current sort function */
+static uchar f_running = 1;     /* 0 when sfm should exit */
 
 static int (*sortfn)(const void *x, const void *y);
 
@@ -225,7 +226,7 @@ revsizecmp(const void *x, const void *y)
         return -sizecmp(x, y);
 }
 
-void
+static void
 cursesinit(void)
 {
         if (!initscr())
@@ -237,22 +238,26 @@ cursesinit(void)
         keypad(stdscr, 1);
 
         start_color();
+
+        /* define constants for each color */
         init_pair(1, COLOR_CYAN, COLOR_BLACK);
         init_pair(2, COLOR_GREEN, COLOR_BLACK);
+        init_pair(3, COLOR_YELLOW, COLOR_BLACK);
 
+        /* TODO: move away from here */
         win = emalloc(sizeof(Win));
         win->ents = NULL;
-        win->sel = win->nsel = win->nf = 0;
+        win->sel = win->nsel = win->nents = 0;
 }
 
-int
+static ulong
 entcount(char *path)
 {
         DIR *dir;
         struct dirent *dent;
         int n = 0;
 
-        /*TODO: handle error properly */
+        /* FIXME: repating code, do something! */
         if ((dir = opendir(path)) == NULL)
                 die("sfm: opendir failed");
 
@@ -265,10 +270,11 @@ entcount(char *path)
 
         }
         (void)closedir(dir);
+
         return n;
 }
 
-Entry *
+static Entry *
 entget(char *path, ulong n)
 {
         DIR *dir;
@@ -293,7 +299,6 @@ entget(char *path, ulong n)
                 stat(ents[i].name, &ents[i].stat);
                 ents[i].tm = localtime(&ents[i].stat.st_ctime);
                 ents[i].atime = asctime(ents[i].tm);
-                statsget(&ents[i]);
 
                 ents[i].attrs = 0;
                 ents[i].flags = 0;
@@ -307,23 +312,48 @@ entget(char *path, ulong n)
                 case DT_REG:
                         ents[i].attrs |= COLOR_PAIR(2);
                         break;
+                case DT_LNK:
+                        ents[i].attrs |= COLOR_PAIR(3);
+                        break;
                 }
+
+                sprintf(ents[i].statstr, "%c%c%c%c%c%c%c%c%c%c %ldB %s",
+                        (S_ISDIR(ents[i].stat.st_mode)) ? 'd' : '-',
+                        ents[i].stat.st_mode & S_IRUSR ? 'r' : '-',
+                        ents[i].stat.st_mode & S_IWUSR ? 'w' : '-',
+                        ents[i].stat.st_mode & S_IXUSR ? 'x' : '-',
+                        ents[i].stat.st_mode & S_IRGRP ? 'r' : '-',
+                        ents[i].stat.st_mode & S_IWGRP ? 'w' : '-',
+                        ents[i].stat.st_mode & S_IXGRP ? 'x' : '-',
+                        ents[i].stat.st_mode & S_IROTH ? 'r' : '-',
+                        ents[i].stat.st_mode & S_IWOTH ? 'w' : '-',
+                        ents[i].stat.st_mode & S_IXOTH ? 'x' : '-',
+                        ents[i].stat.st_size, ents[i].atime);
+
+                /* remove newline from statstr */
+                ents[i].statstr[strlen(ents[i].statstr) - 1] = '\0';
 
                 i++;
 
         }
         (void)closedir(dir);
         ENTSORT(ents, n);
+
         return ents;
 }
 
 /*TODO: handle f_info*/
-void
+static void
 entprint(void)
 {
         int i = 0;
 
-        for (; i < win->nf && i < YMAX; i++) {
+        attron(A_BOLD);
+        addstr(curdir);
+        attroff(A_BOLD);
+        mvhline(1, 0, ACS_HLINE, XMAX);
+
+        for (; i < win->nents && i < YMAX; i++) {
                 move(i + 2, 0);
                 addch(win->ents[i].selected ? '+' : ' ');
 
@@ -331,75 +361,21 @@ entprint(void)
                         attron(A_REVERSE);
 
                 attron(win->ents[i].attrs);
-                printw(" %s", win->ents[i].name);
+                addstr(win->ents[i].name);
                 attroff(A_REVERSE | win->ents[i].attrs);
         }
 
-        mvprintw(YMAX - 1, 0, "%ld/%ld %s", win->sel + 1, win->nf,
+        mvprintw(YMAX - 1, 0, "%ld/%ld %s", win->sel + 1, win->nents,
                  win->ents[win->sel].statstr);
 }
 
-void
-statusbar(void)
-{
-        char host[HOST_NAME_MAX];
-        char user[LOGIN_NAME_MAX];
-
-        gethostname(host, HOST_NAME_MAX);
-        getlogin_r(user, LOGIN_NAME_MAX);
-        attron(A_BOLD);
-        mvprintw(0, 0, "%s@%s:%s", user, host, curdir);
-        attroff(A_BOLD);
-        mvhline(1, 0, ACS_HLINE, XMAX);
-}
-
-void
-statsget(Entry *ent)
-{
-        sprintf(ent->statstr, "%c%c%c%c%c%c%c%c%c%c %ldB %s",
-                (S_ISDIR(ent->stat.st_mode)) ? 'd' : '-',
-                ent->stat.st_mode & S_IRUSR ? 'r' : '-',
-                ent->stat.st_mode & S_IWUSR ? 'w' : '-',
-                ent->stat.st_mode & S_IXUSR ? 'x' : '-',
-                ent->stat.st_mode & S_IRGRP ? 'r' : '-',
-                ent->stat.st_mode & S_IWGRP ? 'w' : '-',
-                ent->stat.st_mode & S_IXGRP ? 'x' : '-',
-                ent->stat.st_mode & S_IROTH ? 'r' : '-',
-                ent->stat.st_mode & S_IWOTH ? 'w' : '-',
-                ent->stat.st_mode & S_IXOTH ? 'x' : '-',
-                ent->stat.st_size, ent->atime);
-}
-
-void
-filepreview(void)
-{
-        WINDOW *fw;
-        FILE *fp;
-        Entry *ent = &win->ents[win->sel];
-        char buf[BUFSIZ];
-        size_t maxlen = XMAX >> 1;
-        int ln = 0;
-
-        if (ent->flags & DT_REG) {
-                if ((fp = fopen(ent->name, "r")) == NULL)
-                        return;
-                fw = newwin(YMAX - 2, maxlen, 2, maxlen);
-                while (fgets(buf, BUFSIZ, fp) && ln < YMAX) {
-                        if (strlen(buf) > maxlen)
-                                buf[maxlen] = '\0';
-                        mvwaddstr(fw, ln++, 0, buf);
-                }
-                fclose(fp);
-                wrefresh(fw);
-                f_redraw = 1;
-        }
-}
-
-void
+/* TODO: get rid of the `switch`, use vfprintf */
+static void
 notify(int flag, const char *str)
 {
         move(YMAX - 1, 0);
         clrtoeol();
+
         switch (flag) {
         case MSG_EXEC:
                 printw(msgs[MSG_EXEC], str);
@@ -414,7 +390,7 @@ notify(int flag, const char *str)
 }
 
 /* TODO: fix backspace and change name */
-char *
+static char *
 promptstr(const char *msg)
 {
         char buf[BUFSIZ], *str;
@@ -450,7 +426,7 @@ promptstr(const char *msg)
         return str;
 }
 
-int
+static int
 confirmact(const char *str)
 {
         if (f_noconfirm)
@@ -459,7 +435,7 @@ confirmact(const char *str)
         return (getch() == 'y');
 }
 
-int
+static int
 spawn(char *cmd)
 {
         char *args[] = {getenv(envs[ENV_SHELL]), "-c", cmd, NULL};
@@ -467,7 +443,6 @@ spawn(char *cmd)
         struct sigaction oldsigtstp;
         pid_t pid;
         int status;
-
 
         switch (pid = fork()) {
         case -1:
@@ -487,10 +462,9 @@ spawn(char *cmd)
         return 0;
 }
 
-void
+static void
 nav(const Arg *arg)
 {
-        /*TODO: try make to fallthrough */
         Entry *ent = &win->ents[win->sel];
         char buf[BUFSIZ];
 
@@ -502,6 +476,7 @@ nav(const Arg *arg)
         case NAV_RIGHT:
                 if (ent->flags & DT_DIR)
                         echdir(ent->name);
+                /* TODO: handle links to dirs */
 
                 if (ent->flags & DT_REG) {
                         sprintf(buf, "%s %s", cmds[CMD_OPEN],
@@ -521,14 +496,17 @@ nav(const Arg *arg)
                 win->sel = 0;
                 break;
         case NAV_BOTTOM:
-                win->sel = win->nf - 1;
+                win->sel = win->nents - 1;
+                break;
+        case NAV_SELECT:
+                win->ents[win->sel].selected ^= 1;
+                if (win->ents[win->sel++].selected)
+                        win->nsel++;
+                else
+                        win->nsel--;
                 break;
         case NAV_SHOWALL:
                 f_showall ^= 1;
-                f_redraw = 1;
-                break;
-        case NAV_FPREVIEW:
-                f_fpreview ^= 1; 
                 f_redraw = 1;
                 break;
         case NAV_INFO:
@@ -538,27 +516,20 @@ nav(const Arg *arg)
         case NAV_REDRAW:
                 f_redraw = 1;
                 break;
+        case NAV_EXIT:
+                f_running = 0;
+                break;
         }
 }
 
-void
+static void
 cd(const Arg *arg)
 {
         echdir(arg->s);
         f_redraw = 1;
 }
 
-void
-selectitem(const Arg *arg)
-{
-        win->ents[win->sel].selected ^= 1;
-        if (win->ents[win->sel++].selected)
-                win->nsel++;
-        else
-                win->nsel--;
-}
-
-void
+static void
 run(const Arg *arg)
 {
         char buf[BUFSIZ];
@@ -569,7 +540,7 @@ run(const Arg *arg)
 
         /*TODO: make prettier */
         if (win->nsel > 0) {
-                for (; i < win->nf; i++) {
+                for (; i < win->nents; i++) {
                         if (win->ents[i].selected) {
                                 escape(tmp, win->ents[i].name);
                                 sprintf(buf + strlen(buf), " %s ", tmp);
@@ -580,13 +551,14 @@ run(const Arg *arg)
                 sprintf(buf + strlen(buf), " %s ", tmp);
         }
 
+        f_noconfirm = 0;
         if (confirmact(buf)) {
                 spawn(buf);
                 f_redraw = 1;
         }
 }
 
-void
+static void
 builtinrun(const Arg *arg)
 {
         Arg prog;
@@ -617,7 +589,7 @@ builtinrun(const Arg *arg)
         f_redraw = 1;
 }
 
-void
+static void
 sort(const Arg *arg)
 {
         notify(MSG_SORT, NULL);
@@ -637,10 +609,10 @@ sort(const Arg *arg)
                 f_revsort ^= 1;
                 break;
         }
-        ENTSORT(win->ents, win->nf);
+        ENTSORT(win->ents, win->nents);
 }
 
-void
+static void
 prompt(const Arg *arg)
 {
         char buf[BUFSIZ];
@@ -652,29 +624,20 @@ prompt(const Arg *arg)
         }
 }
 
-void
-quit(const Arg *arg)
-{
-        entcleanup(win->ents);
-        free(win);
-        endwin();
-        exit(EXIT_SUCCESS);
-}
-
-void
+static void
 entcleanup(Entry *ent)
 {
         int i = 0;
 
         if (win->ents != NULL) {
-                for (; i < win->nf; i++)
+                for (; i < win->nents; i++)
                         if (win->ents[i].name != NULL)
                                 free(win->ents[i].name);
                 free(win->ents);
         }
 }
 
-void
+static void
 escape(char *buf, const char *str)
 {
         for (; *str; str++) {
@@ -690,14 +653,14 @@ escape(char *buf, const char *str)
         *buf = '\0';
 }
 
-void
+static void
 xdelay(useconds_t delay)
 {
         refresh();
         usleep(delay);
 }
 
-void
+static void
 echdir(const char *path)
 {
         if (chdir(path) != 0) {
@@ -706,7 +669,7 @@ echdir(const char *path)
         }
 }
 
-void *
+static void *
 emalloc(size_t nb)
 {
         void *p;
@@ -716,7 +679,7 @@ emalloc(size_t nb)
         return p;
 }
 
-void
+static void
 die(const char *fmt, ...)
 {
         va_list args;
@@ -734,36 +697,30 @@ die(const char *fmt, ...)
         exit(EXIT_FAILURE);
 }
 
-int
-main(int argc, char *argv[])
+static void
+sfmrun(void)
 {
         char cwd[PATH_MAX] = {0};
         int c, i;
 
-        cursesinit();
-        f_redraw = 1;
-        f_namesort = 1;
-        sortfn = namecmp;
-
-        for (;;) {
+        while (f_running) {
                 erase();
 
                 if (f_redraw) {
                         if ((curdir = getcwd(cwd, sizeof(cwd))) == NULL)
                                 die("sfm: can't get cwd");
+
                         entcleanup(win->ents);
-                        win->nf = entcount(curdir);
-                        if ((win->ents = entget(curdir, win->nf)) == NULL)
+                        win->nents = entcount(curdir);
+                        if ((win->ents = entget(curdir, win->nents)) == NULL)
                                 die("sfm: can't get entries");
+
                         f_redraw = 0;
                         refresh();
                 }
 
                 SEL_CORRECT;
-                statusbar();
                 entprint();
-                if (f_fpreview)
-                        filepreview();
 
                 /*TODO: signal/timeout */
                 c = getch();
@@ -771,6 +728,26 @@ main(int argc, char *argv[])
                         if (c == keys[i].key)
                                 keys[i].func(&(keys[i].arg));
         }
+}
+
+static void
+cleanup(void)
+{
+        entcleanup(win->ents);
+        free(win);
+        endwin();
+}
+
+int
+main(int argc, char *argv[])
+{
+        f_redraw = 1;
+        f_namesort = 1;
+        sortfn = namecmp;
+
+        cursesinit();
+        sfmrun();
+        cleanup();
 
         return 0;
 }
