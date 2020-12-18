@@ -42,6 +42,7 @@
 #endif /* DEL */
 
 #define DELAY_MS 350000
+#define SCROLLOFF 4
 
 #define CTRL(x)         ((x) & 0x1f)
 #define YMAX            (getmaxy(stdscr))
@@ -51,10 +52,6 @@
 #define ARRLEN(x)       (sizeof(x) / sizeof(x[0]))
 #define ISDIGIT(x)      ((unsigned int)(x) - '0' <= 9)
 #define ENTSORT(e, n)   (qsort((e), (n), sizeof(*(e)), sortfn))
-
-#define SEL_CORRECT                                                     \
-        win->sel = ((win->sel < 0) ? 0 : (win->sel > win->nents - 1)    \
-                    ? win->nents - 1 : win->sel);
 
 /* type definitions */
 typedef unsigned char uchar;
@@ -91,7 +88,6 @@ typedef union {
 } Arg;
 
 typedef struct {
-        int mod;
         int key;
         void (*func)(const Arg *arg);
         const Arg arg;
@@ -142,7 +138,7 @@ enum {
 static void      cursesinit(void);
 static ulong     entcount(char *);
 static Entry    *entget(char *, ulong);
-static void      entprint(void);
+static void      entprint(int);
 static void      notify(int, const char *);
 static char     *promptstr(const char *);
 static int       confirmact(const char *);
@@ -153,6 +149,7 @@ static void      run(const Arg *);
 static void      builtinrun(const Arg *);
 static void      sort(const Arg *);
 static void      prompt(const Arg *);
+static void      selcorrect(void);
 static void      entcleanup(Entry *);
 static void      escape(char *, const char *);
 static void      xdelay(useconds_t);
@@ -186,6 +183,7 @@ static const char *msgs[] = {
 /* globals variables */
 static Win *win = NULL;         /* main display */
 static char *curdir = NULL;     /* current directory */
+static int curscroll = 0;       /* cursor scroll */
 
 /* flags */
 static uchar f_showall = 0;     /* show hidden files */
@@ -229,6 +227,8 @@ revsizecmp(const void *x, const void *y)
 static void
 cursesinit(void)
 {
+        int i = 0;
+
         if (!initscr())
                 die("sfm: initscr failed");
 
@@ -236,18 +236,13 @@ cursesinit(void)
         cbreak();
         curs_set(0);
         keypad(stdscr, 1);
+        /*timeout(1000);*/
+        /*set_escdelay(25);*/
 
         start_color();
 
-        /* define constants for each color */
-        init_pair(1, COLOR_CYAN, COLOR_BLACK);
-        init_pair(2, COLOR_GREEN, COLOR_BLACK);
-        init_pair(3, COLOR_YELLOW, COLOR_BLACK);
-
-        /* TODO: move away from here */
-        win = emalloc(sizeof(Win));
-        win->ents = NULL;
-        win->sel = win->nsel = win->nents = 0;
+        for (; i < ARRLEN(colors); i++)
+                init_pair(i + 1, colors[i], COLOR_BLACK);
 }
 
 static ulong
@@ -314,7 +309,12 @@ entget(char *path, ulong n)
                         break;
                 case DT_LNK:
                         ents[i].attrs |= COLOR_PAIR(3);
+                        if (S_ISDIR(ents[i].stat.st_mode)) {
+                                ents[i].flags |= DT_DIR;
+                                ents[i].attrs |= A_BOLD;
+                        }
                         break;
+                /* TODO: handle more modes from stat(3) */
                 }
 
                 sprintf(ents[i].statstr, "%c%c%c%c%c%c%c%c%c%c %ldB %s",
@@ -330,8 +330,9 @@ entget(char *path, ulong n)
                         ents[i].stat.st_mode & S_IXOTH ? 'x' : '-',
                         ents[i].stat.st_size, ents[i].atime);
 
-                /* remove newline from statstr */
+                /* remove newlines */
                 ents[i].statstr[strlen(ents[i].statstr) - 1] = '\0';
+                ents[i].atime[strlen(ents[i].atime) - 1] = '\0';
 
                 i++;
 
@@ -342,11 +343,13 @@ entget(char *path, ulong n)
         return ents;
 }
 
-/*TODO: handle f_info*/
+/*TODO: add offset for scrolling */
 static void
-entprint(void)
+entprint(int off)
 {
+        Entry *ent;
         int i = 0;
+        char ind;
 
         attron(A_BOLD);
         addstr(curdir);
@@ -354,15 +357,55 @@ entprint(void)
         mvhline(1, 0, ACS_HLINE, XMAX);
 
         for (; i < win->nents && i < YMAX; i++) {
+                ent = &win->ents[i + off];
+
                 move(i + 2, 0);
-                addch(win->ents[i].selected ? '+' : ' ');
+                addch(ent->selected ? '+' : ' ');
 
                 if (i == win->sel)
                         attron(A_REVERSE);
 
-                attron(win->ents[i].attrs);
-                addstr(win->ents[i].name);
-                attroff(A_REVERSE | win->ents[i].attrs);
+                if (f_info)
+                        printw("%s  %c%c%c %10ldB  ",
+                                ent->atime,
+                                '0' + ((ent->stat.st_mode >> 6) & 7),
+                                '0' + ((ent->stat.st_mode >> 3) & 7),
+                                '0' + (ent->stat.st_mode & 7),
+                                ent->stat.st_size);
+
+                attron(ent->attrs);
+                addstr(ent->name);
+                attroff(A_REVERSE | ent->attrs);
+
+                switch (ent->stat.st_mode & S_IFMT) {
+                /* FIXME: for some reason regular files fall here too */
+                case S_IFDIR:
+                        ind = '/';
+                        break;
+                case S_IFREG:
+                        if (ent->stat.st_mode & 0100)
+                                ind = '*';
+                        break;
+                case S_IFLNK:
+                        ind = (ent->flags & DT_DIR) ? '/' : '@';
+                        break;
+                case S_IFSOCK:
+                        ind = '=';
+                        break;
+                case S_IFIFO:
+                        ind = '|';
+                        break;
+                case S_IFBLK:
+                        ind = '%';
+                        break;
+                case S_IFCHR:
+                        ind = '#';
+                        break;
+                default:
+                        ind = '?';
+                }
+
+                addch(ind);
         }
 
         mvprintw(YMAX - 1, 0, "%ld/%ld %s", win->sel + 1, win->nents,
@@ -481,6 +524,7 @@ nav(const Arg *arg)
                 if (ent->flags & DT_REG) {
                         sprintf(buf, "%s %s", cmds[CMD_OPEN],
                                 win->ents[win->sel].name);
+                        /* TODO: escape this buf! */
                         if (!spawn(buf))
                                 notify(MSG_FAIL, NULL);
                 }
@@ -584,7 +628,7 @@ builtinrun(const Arg *arg)
                 return;
         }
 
-        f_noconfirm = 1;
+        f_noconfirm = 0;
         run(&prog);
         f_redraw = 1;
 }
@@ -622,6 +666,15 @@ prompt(const Arg *arg)
                 spawn(buf);
                 f_redraw = 1;
         }
+}
+static void
+selcorrect(void)
+{
+        if (win->sel < 0)
+                win->sel = 0;
+        else if (win->sel > win->nents - 1)
+                win->sel = win->nents - 1;
+
 }
 
 static void
@@ -719,14 +772,15 @@ sfmrun(void)
                         refresh();
                 }
 
-                SEL_CORRECT;
-                entprint();
+                selcorrect();
+                curscroll = win->sel > YMAX - 4 ? SCROLLOFF : 0;
+                entprint(curscroll);
 
                 /*TODO: signal/timeout */
-                c = getch();
-                for (i = 0; i < ARRLEN(keys); i++)
-                        if (c == keys[i].key)
-                                keys[i].func(&(keys[i].arg));
+                if ((c = getch()) != ERR)
+                        for (i = 0; i < ARRLEN(keys); i++)
+                                if (c == keys[i].key)
+                                        keys[i].func(&(keys[i].arg));
         }
 }
 
@@ -746,6 +800,11 @@ main(int argc, char *argv[])
         sortfn = namecmp;
 
         cursesinit();
+
+        win = emalloc(sizeof(Win));
+        win->ents = NULL;
+        win->sel = win->nsel = win->nents = 0;
+
         sfmrun();
         cleanup();
 
