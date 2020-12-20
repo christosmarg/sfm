@@ -5,6 +5,7 @@
 
 #include <dirent.h>
 #include <limits.h>
+#include <locale.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -795,16 +796,16 @@ cleanup(void)
 int
 main(int argc, char *argv[])
 {
-        f_redraw = 1;
-        f_namesort = 1;
-        sortfn = namecmp;
-
-        cursesinit();
-
         win = emalloc(sizeof(Win));
         win->ents = NULL;
         win->sel = win->nsel = win->nents = 0;
 
+        f_redraw = 1;
+        f_namesort = 1;
+        sortfn = namecmp;
+
+        setlocale(LC_ALL, "");
+        cursesinit();
         sfmrun();
         cleanup();
 

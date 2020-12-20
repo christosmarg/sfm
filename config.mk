@@ -9,7 +9,7 @@ BIN_DIR = ${PREFIX}/bin
 
 # includes and libs
 INCS = -Iinclude 
-LIBS = -Llib -lncurses # add ncursesw
+LIBS = -Llib -lncursesw
 
 # flags
 CPPFLAGS = -D_DEFAULT_SOURCE -D_BSD_SOURCE -D_POSIX_C_SOURCE=200809L \
