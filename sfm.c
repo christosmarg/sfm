@@ -397,10 +397,10 @@ entprint(int off)
                         ind = '|';
                         break;
                 case S_IFBLK:
-                        ind = '%';
+                        ind = 'b';
                         break;
                 case S_IFCHR:
-                        ind = '#';
+                        ind = 'c';
                         break;
                 default:
                         ind = '?';
