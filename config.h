@@ -1,14 +1,23 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-/* TODO: useless? */
-#define CD(dir) {.s = (dir)}
-#define SHCMD(cmd) {.s = (cmd)}
+/* c1 e2 27 2e 00 60 33 f7 c6 d6 ab c4 */
+/* https://upload.wikimedia.org/wikipedia/commons/1/15/Xterm_256color_chart.svg */
 
 static int colors[] = {
-        COLOR_CYAN,     /* directories */
-        COLOR_GREEN,    /* regular files */
-        COLOR_YELLOW,   /* symlinks */
+        [C_BLK] = 0x00, /* TODO: Block device */
+        [C_CHR] = 0xe2, /* Character device */
+        [C_DIR] = 0x27, /* Directory */
+        [C_EXE] = 0xd6, /* Executable file */
+        [C_FIL] = 0xff, /* Regular file */
+        [C_HRD] = 0x00, /* TODO: Hard link */
+        [C_LNK] = 0x33, /* Symbolic link */
+        [C_MIS] = 0x00, /* TODO: Missing file OR file details */
+        [C_ORP] = 0x00, /* TODO: Orphaned symlink */
+        [C_PIP] = 0x00, /* TODO: Named pipe (FIFO) */
+        [C_SOC] = 0x2e, /* Socket */
+        [C_UND] = 0x00, /* TODO: Unknown OR 0B regular/exe file */
+        [C_INF] = 0xf7, /* Information */
 };
 
 static Key keys[] = {
@@ -29,14 +38,14 @@ static Key keys[] = {
         {  'i',            nav,             {.n = NAV_INFO} },
         {  CTRL('r'),      nav,             {.n = NAV_REDRAW} },
         {  'q',            nav,             {.n = NAV_EXIT} },
-        {  '~',            cd,              CD("/home/christos") },
-        {  CTRL('n'),      cd,              CD("/mnt/christos_ntfs/christos") },
+        {  '~',            cd,              {.s = "/home/christos"} },
+        {  CTRL('b'),      cd,              {.s = "/storage"} },
         /* TODO: get rid of builtinrun */
         {  'p',            builtinrun,      {.n = RUN_PAGER} },
         {  'e',            builtinrun,      {.n = RUN_EDITOR} },
         {  'o',            builtinrun,      {.n = RUN_OPENWITH} },
         {  'r',            builtinrun,      {.n = RUN_RENAME} },
-        {  'x',            run,             SHCMD("rm -rf") },
+        {  'x',            run,             {.s = "rm -rf"} },
         {  's',            sort,            {.v = NULL} },
         {  ':',            prompt,          {.v = NULL} },
 };

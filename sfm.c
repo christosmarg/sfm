@@ -65,11 +65,10 @@ typedef unsigned long long ull;
 /* structs, unions and enums */
 typedef struct {
         struct stat      stat;
-        struct tm       *tm;
-        char             statstr[BUFSIZ];
-        char            *atime;
+        char             statstr[36]; /* XXX no? */
+        char             date[12];
+        char             sizestr[12];
         char            *name;
-        uint             attrs;
         ushort           nlen;
         uchar            flags;
         uchar            selected;
@@ -93,6 +92,12 @@ typedef struct {
         void (*func)(const Arg *arg);
         const Arg arg;
 } Key;
+
+
+enum {
+        DIR_OR_DIRLNK   = 1 << 0,
+        HARD_LNK        = 1 << 1,
+};
 
 enum {
         NAV_LEFT,
@@ -135,11 +140,29 @@ enum {
         MSG_FAIL,
 };
 
+/* Colors */
+enum {
+        C_BLK = 1, /* Block device */
+        C_CHR, /* Character device */
+        C_DIR, /* Directory */
+        C_EXE, /* Executable file */
+        C_FIL, /* Regular file */
+        C_HRD, /* Hard link */
+        C_LNK, /* Symbolic link */
+        C_MIS, /* Missing file OR file details */
+        C_ORP, /* Orphaned symlink */
+        C_PIP, /* Named pipe (FIFO) */
+        C_SOC, /* Socket */
+        C_UND, /* Unknown OR 0B regular/exe file */
+        C_INF, /* Information */
+};
+
 /* function declarations */
 static void      cursesinit(void);
 static ulong     entcount(char *);
 static Entry    *entget(char *, ulong);
-static void      entprint(int);
+static void      entprint(void);
+static char     *fmtsize(size_t);
 static void      notify(int, const char *);
 static char     *promptstr(const char *);
 static int       confirmact(const char *);
@@ -151,13 +174,12 @@ static void      builtinrun(const Arg *);
 static void      sort(const Arg *);
 static void      prompt(const Arg *);
 static void      selcorrect(void);
-static void      entcleanup(Entry *);
+static void      entcleanup(void);
 static void      escape(char *, const char *);
 static void      xdelay(useconds_t);
 static void      echdir(const char *);
 static void     *emalloc(size_t);
 static void      die(const char *, ...);
-static void      sfmrun(void);
 static void      cleanup(void);
 
 /* useful strings */
@@ -176,7 +198,7 @@ static const char *msgs[] = {
         [MSG_OPENWITH] = "open with: ",
         [MSG_RENAME] = "rename: ",
         [MSG_EXEC] = "execute '%s' (y/N)?",
-        [MSG_SORT] = "'n'ame 's'ize 'r'everse",
+        [MSG_SORT] = "'n'ame 's'ize 'd'ate 'r'everse",
         [MSG_PROMPT] = ":",
         [MSG_FAIL] = "action failed"
 };
@@ -184,7 +206,9 @@ static const char *msgs[] = {
 /* globals variables */
 static Win *win = NULL;         /* main display */
 static char *curdir = NULL;     /* current directory */
+static int cur = 0;             /* cursor position */
 static int curscroll = 0;       /* cursor scroll */
+static int scrolldir;           /* scroll direction */
 
 /* flags */
 static uchar f_showall = 0;     /* show hidden files */
@@ -193,6 +217,7 @@ static uchar f_info = 0;        /* show info about entries */
 static uchar f_noconfirm = 0;   /* exec without confirmation */
 static uchar f_namesort = 0;    /* sort entries by name */
 static uchar f_sizesort = 0;    /* sort entries by size */
+static uchar f_datesort = 0;    /* sort entries by date */
 static uchar f_revsort = 0;     /* reverse current sort function */
 static uchar f_running = 1;     /* 0 when sfm should exit */
 
@@ -214,6 +239,18 @@ revnamecmp(const void *x, const void *y)
 }
 
 static inline int
+datecmp(const void *x, const void *y)
+{
+        return (strcmp(((Entry *)x)->date, ((Entry *)y)->date));
+}
+
+static inline int
+revdatecmp(const void *x, const void *y)
+{
+        return -datecmp(x, y);
+}
+
+static inline int
 sizecmp(const void *x, const void *y)
 {
         return -(((Entry *)x)->stat.st_size - ((Entry *)y)->stat.st_size);
@@ -228,7 +265,7 @@ revsizecmp(const void *x, const void *y)
 static void
 cursesinit(void)
 {
-        int i = 0;
+        int i = 1;
 
         if (!initscr())
                 die("sfm: initscr failed");
@@ -243,7 +280,7 @@ cursesinit(void)
         start_color();
 
         for (; i < ARRLEN(colors); i++)
-                init_pair(i + 1, colors[i], COLOR_BLACK);
+                init_pair(i, colors[i], COLOR_BLACK);
 }
 
 static ulong
@@ -275,8 +312,10 @@ entget(char *path, ulong n)
 {
         DIR *dir;
         struct dirent *dent;
+        struct tm *tm;
         Entry *ents;
         int i = 0;
+        char type;
         
         ents = emalloc(n * sizeof(Entry));
         if ((dir = opendir(path)) == NULL)
@@ -293,33 +332,47 @@ entget(char *path, ulong n)
                 strcpy(ents[i].name, dent->d_name);
 
                 stat(ents[i].name, &ents[i].stat);
-                ents[i].tm = localtime(&ents[i].stat.st_ctime);
-                ents[i].atime = asctime(ents[i].tm);
+                tm = localtime(&ents[i].stat.st_ctime);
+                strftime(ents[i].date, 12, "%F", tm);
+                strcpy(ents[i].sizestr, fmtsize(ents[i].stat.st_size));
 
-                ents[i].attrs = 0;
                 ents[i].flags = 0;
                 ents[i].selected = 0;
                 ents[i].flags |= dent->d_type;
 
-                switch (ents[i].flags) {
-                case DT_DIR:
-                        ents[i].attrs |= COLOR_PAIR(1) | A_BOLD;
+                /* TODO: use fstatat(3) */
+
+                /* FIXME: links don't work */
+                switch (ents[i].stat.st_mode & S_IFMT) {
+                case S_IFREG:
+                        type = '-';
                         break;
-                case DT_REG:
-                        ents[i].attrs |= COLOR_PAIR(2);
+                case S_IFDIR:
+                        type = 'd';
                         break;
-                case DT_LNK:
-                        ents[i].attrs |= COLOR_PAIR(3);
-                        if (S_ISDIR(ents[i].stat.st_mode)) {
-                                ents[i].flags |= DT_DIR;
-                                ents[i].attrs |= A_BOLD;
-                        }
+                case S_IFLNK:
+                        type = 'l';
                         break;
-                /* TODO: handle more modes from stat(3) */
+                case S_IFSOCK:
+                        type = 's';
+                        break;
+                case S_IFIFO:
+                        type = 'p';
+                        break;
+                case S_IFBLK:
+                        type = 'b';
+                        break;
+                case S_IFCHR:
+                        type = 'c';
+                        break;
+                default:
+                        type = '?';
+                        break;
                 }
 
-                sprintf(ents[i].statstr, "%c%c%c%c%c%c%c%c%c%c %ldB %s",
-                        (S_ISDIR(ents[i].stat.st_mode)) ? 'd' : '-',
+                /* seperate field for lsperms? */
+                sprintf(ents[i].statstr, "%c%c%c%c%c%c%c%c%c%c %s %s",
+                        type,
                         ents[i].stat.st_mode & S_IRUSR ? 'r' : '-',
                         ents[i].stat.st_mode & S_IWUSR ? 'w' : '-',
                         ents[i].stat.st_mode & S_IXUSR ? 'x' : '-',
@@ -329,11 +382,7 @@ entget(char *path, ulong n)
                         ents[i].stat.st_mode & S_IROTH ? 'r' : '-',
                         ents[i].stat.st_mode & S_IWOTH ? 'w' : '-',
                         ents[i].stat.st_mode & S_IXOTH ? 'x' : '-',
-                        ents[i].stat.st_size, ents[i].atime);
-
-                /* remove newlines */
-                ents[i].statstr[strlen(ents[i].statstr) - 1] = '\0';
-                ents[i].atime[strlen(ents[i].atime) - 1] = '\0';
+                        ents[i].sizestr, ents[i].date);
 
                 i++;
 
@@ -344,73 +393,105 @@ entget(char *path, ulong n)
         return ents;
 }
 
-/*TODO: add offset for scrolling */
 static void
-entprint(int off)
+entprint(void)
 {
         Entry *ent;
         int i = 0;
+        uint attrs;
+        uchar color;
         char ind;
 
-        attron(A_BOLD);
+        attron(A_BOLD | COLOR_PAIR(C_DIR));
         addstr(curdir);
-        attroff(A_BOLD);
-        mvhline(1, 0, ACS_HLINE, XMAX);
+        attroff(A_BOLD | COLOR_PAIR(C_DIR));
 
         for (; i < win->nents && i < YMAX; i++) {
-                ent = &win->ents[i + off];
+                ent = &win->ents[i + curscroll];
+                ind = ' ';
+                attrs = 0;
+                color = 0;
 
                 move(i + 2, 0);
                 addch(ent->selected ? '+' : ' ');
 
-                if (i == win->sel)
-                        attron(A_REVERSE);
+                if (i == cur)
+                        attrs |= A_REVERSE;
 
-                if (f_info)
-                        printw("%s  %c%c%c %10ldB  ",
-                                ent->atime,
+                if (f_info) {
+                        attron(COLOR_PAIR(C_INF));
+                        printw("%s  %c%c%c  %7s  ",
+                                ent->date,
                                 '0' + ((ent->stat.st_mode >> 6) & 7),
                                 '0' + ((ent->stat.st_mode >> 3) & 7),
                                 '0' + (ent->stat.st_mode & 7),
-                                ent->stat.st_size);
-
-                attron(ent->attrs);
-                addstr(ent->name);
-                attroff(A_REVERSE | ent->attrs);
+                                ent->sizestr);
+                        attroff(COLOR_PAIR(C_INF));
+                }
 
                 switch (ent->stat.st_mode & S_IFMT) {
-                /* FIXME: for some reason regular files fall here too */
                 case S_IFDIR:
                         ind = '/';
+                        color = C_DIR;
+                        attrs |= A_BOLD;
                         break;
                 case S_IFREG:
-                        if (ent->stat.st_mode & 0100)
+                        color = C_FIL;
+                        if (ent->stat.st_mode & 0100) {
                                 ind = '*';
+                                color = C_EXE;
+                        }
                         break;
                 case S_IFLNK:
                         ind = (ent->flags & DT_DIR) ? '/' : '@';
+                        color = C_LNK;
+                        if (S_ISDIR(ent->stat.st_mode))
+                                attrs |= A_BOLD;
                         break;
                 case S_IFSOCK:
                         ind = '=';
+                        color = C_SOC;
                         break;
                 case S_IFIFO:
                         ind = '|';
+                        color = C_PIP;
                         break;
                 case S_IFBLK:
-                        ind = 'b';
+                        color = C_BLK;
                         break;
                 case S_IFCHR:
-                        ind = 'c';
+                        color = C_CHR;
                         break;
                 default:
                         ind = '?';
+                        color = C_UND;
+                        break;
                 }
+
+                attrs |= COLOR_PAIR(color);
+                attron(attrs);
+                addstr(ent->name);
+                attroff(attrs);
 
                 addch(ind);
         }
 
         mvprintw(YMAX - 1, 0, "%ld/%ld %s", win->sel + 1, win->nents,
                  win->ents[win->sel].statstr);
+}
+
+static char *
+fmtsize(size_t sz)
+{
+        static char buf[12];
+        int i = 0;
+
+        for (; sz > 1024; i++)
+                sz /= 1024;
+        /* TODO: handle floating point parts */
+        sprintf(buf, "%ld%c", sz, "BKMGTPEZY"[i]);
+
+        return buf;
 }
 
 /* TODO: get rid of the `switch`, use vfprintf */
@@ -520,9 +601,9 @@ nav(const Arg *arg)
         case NAV_RIGHT:
                 if (ent->flags & DT_DIR)
                         echdir(ent->name);
-                /* TODO: handle links to dirs */
 
-                if (ent->flags & DT_REG) {
+                /* TODO: handle links to dirs */
+                if (ent->flags & DT_REG && ent->flags & ~DT_LNK) {
                         sprintf(buf, "%s %s", cmds[CMD_OPEN],
                                 win->ents[win->sel].name);
                         /* TODO: escape this buf! */
@@ -533,9 +614,11 @@ nav(const Arg *arg)
                 break;
         case NAV_UP:
                 win->sel--;
+                scrolldir = -1;
                 break;
         case NAV_DOWN:
                 win->sel++;
+                scrolldir = 1;
                 break;
         case NAV_TOP:
                 win->sel = 0;
@@ -637,18 +720,26 @@ builtinrun(const Arg *arg)
 static void
 sort(const Arg *arg)
 {
+        /* FIXME: very stupid implementation */
         notify(MSG_SORT, NULL);
         switch (getch()) {
         case 'n':
                 f_namesort = 1;
                 f_sizesort = 0;
+                f_datesort = 0;
                 sortfn = f_revsort ? namecmp : revnamecmp;
                 break;
         case 's':
                 f_sizesort = 1;
                 f_namesort = 0;
+                f_datesort = 0;
                 sortfn = f_revsort ? sizecmp : revsizecmp;
                 break;
+        case 'd':
+                f_datesort = 1;
+                f_namesort = 0;
+                f_sizesort = 0;
+                sortfn = f_revsort ? datecmp : revdatecmp;
         case 'r':
                 /* FIXME: what the fuck? make it choose a function now */
                 f_revsort ^= 1;
@@ -668,6 +759,7 @@ prompt(const Arg *arg)
                 f_redraw = 1;
         }
 }
+
 static void
 selcorrect(void)
 {
@@ -676,10 +768,19 @@ selcorrect(void)
         else if (win->sel > win->nents - 1)
                 win->sel = win->nents - 1;
 
+        cur = win->sel;
+
+        /* FIXME: BUGS! NAV_BOTTOM doesn't work. Resets after using exec  */
+        if (win->sel > YMAX - 4 - SCROLLOFF) {
+                cur = YMAX - 4 - SCROLLOFF;
+                curscroll += scrolldir;
+        } else {
+                curscroll = 0;
+        }
 }
 
 static void
-entcleanup(Entry *ent)
+entcleanup(void)
 {
         int i = 0;
 
@@ -752,43 +853,9 @@ die(const char *fmt, ...)
 }
 
 static void
-sfmrun(void)
-{
-        char cwd[PATH_MAX] = {0};
-        int c, i;
-
-        while (f_running) {
-                erase();
-
-                if (f_redraw) {
-                        if ((curdir = getcwd(cwd, sizeof(cwd))) == NULL)
-                                die("sfm: can't get cwd");
-
-                        entcleanup(win->ents);
-                        win->nents = entcount(curdir);
-                        if ((win->ents = entget(curdir, win->nents)) == NULL)
-                                die("sfm: can't get entries");
-
-                        f_redraw = 0;
-                        refresh();
-                }
-
-                selcorrect();
-                curscroll = win->sel > YMAX - 4 ? SCROLLOFF : 0;
-                entprint(curscroll);
-
-                /*TODO: signal/timeout */
-                if ((c = getch()) != ERR)
-                        for (i = 0; i < ARRLEN(keys); i++)
-                                if (c == keys[i].key)
-                                        keys[i].func(&(keys[i].arg));
-        }
-}
-
-static void
 cleanup(void)
 {
-        entcleanup(win->ents);
+        entcleanup();
         free(win);
         endwin();
 }
@@ -796,6 +863,9 @@ cleanup(void)
 int
 main(int argc, char *argv[])
 {
+        char cwd[PATH_MAX] = {0};
+        int ch, i;
+
         win = emalloc(sizeof(Win));
         win->ents = NULL;
         win->sel = win->nsel = win->nents = 0;
@@ -806,7 +876,34 @@ main(int argc, char *argv[])
 
         setlocale(LC_ALL, "");
         cursesinit();
-        sfmrun();
+
+        while (f_running) {
+                erase();
+
+                if (f_redraw) {
+                        if ((curdir = getcwd(cwd, sizeof(cwd))) == NULL)
+                                die("sfm: can't get cwd");
+
+                        entcleanup();
+                        win->nents = entcount(curdir);
+                        if ((win->ents = entget(curdir, win->nents)) == NULL)
+                                die("sfm: can't get entries");
+
+                        f_redraw = 0;
+                        refresh();
+                }
+
+                /* TODO: change name */
+                selcorrect();
+                entprint();
+
+                /*TODO: signal/timeout */
+                if ((ch = getch()) != ERR)
+                        for (i = 0; i < ARRLEN(keys); i++)
+                                if (ch == keys[i].key)
+                                        keys[i].func(&(keys[i].arg));
+        }
+
         cleanup();
 
         return 0;
