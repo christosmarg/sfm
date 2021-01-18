@@ -337,6 +337,7 @@ entget(char *path, ulong n)
                 strcpy(ents[i].sizestr, fmtsize(ents[i].stat.st_size));
 
                 ents[i].flags = 0;
+                /* FIXME: resets on every redraw, keep track somehow */
                 ents[i].selected = 0;
                 ents[i].flags |= dent->d_type;
 
@@ -406,14 +407,14 @@ entprint(void)
         addstr(curdir);
         attroff(A_BOLD | COLOR_PAIR(C_DIR));
 
-        for (; i < win->nents && i < YMAX; i++) {
+        /* TODO: change 4 to line ignore constant */
+        for (; i < win->nents && i <= YMAX - 4; i++) {
                 ent = &win->ents[i + curscroll];
                 ind = ' ';
                 attrs = 0;
                 color = 0;
 
                 move(i + 2, 0);
-                addch(ent->selected ? '+' : ' ');
 
                 if (i == cur)
                         attrs |= A_REVERSE;
@@ -428,6 +429,8 @@ entprint(void)
                                 ent->sizestr);
                         attroff(COLOR_PAIR(C_INF));
                 }
+
+                addch(ent->selected ? '+' : ' ');
 
                 switch (ent->stat.st_mode & S_IFMT) {
                 case S_IFDIR:
@@ -487,7 +490,7 @@ fmtsize(size_t sz)
         int i = 0;
 
         for (; sz > 1024; i++)
-                sz /= 1024;
+                sz >>= 10;
         /* TODO: handle floating point parts */
         sprintf(buf, "%ld%c", sz, "BKMGTPEZY"[i]);
 
@@ -614,6 +617,10 @@ nav(const Arg *arg)
                 break;
         case NAV_UP:
                 win->sel--;
+                /* 
+                 * Sign indicates direction, number indicates how many
+                 * new directories we should show on every scroll.
+                 */
                 scrolldir = -1;
                 break;
         case NAV_DOWN:
@@ -720,31 +727,41 @@ builtinrun(const Arg *arg)
 static void
 sort(const Arg *arg)
 {
-        /* FIXME: very stupid implementation */
         notify(MSG_SORT, NULL);
+
         switch (getch()) {
         case 'n':
                 f_namesort = 1;
-                f_sizesort = 0;
-                f_datesort = 0;
-                sortfn = f_revsort ? namecmp : revnamecmp;
+                f_sizesort = f_datesort = 0;
                 break;
         case 's':
                 f_sizesort = 1;
-                f_namesort = 0;
-                f_datesort = 0;
-                sortfn = f_revsort ? sizecmp : revsizecmp;
+                f_namesort = f_datesort = 0;
                 break;
         case 'd':
                 f_datesort = 1;
-                f_namesort = 0;
-                f_sizesort = 0;
-                sortfn = f_revsort ? datecmp : revdatecmp;
+                f_namesort = f_sizesort = 0;
         case 'r':
-                /* FIXME: what the fuck? make it choose a function now */
                 f_revsort ^= 1;
                 break;
         }
+
+        if (!f_revsort) {
+                if (f_namesort)
+                        sortfn = namecmp;
+                else if (f_sizesort)
+                        sortfn = sizecmp;
+                else if (f_datesort)
+                        sortfn = datecmp;
+        } else {
+                if (f_namesort)
+                        sortfn = revnamecmp;
+                else if (f_sizesort)
+                        sortfn = revsizecmp;
+                else if (f_datesort)
+                        sortfn = revdatecmp;
+        }
+
         ENTSORT(win->ents, win->nents);
 }
 
@@ -768,13 +785,16 @@ selcorrect(void)
         else if (win->sel > win->nents - 1)
                 win->sel = win->nents - 1;
 
-        cur = win->sel;
-
+        /* TODO: count `onscreen` */
         /* FIXME: BUGS! NAV_BOTTOM doesn't work. Resets after using exec  */
         if (win->sel > YMAX - 4 - SCROLLOFF) {
                 cur = YMAX - 4 - SCROLLOFF;
+                /*if (win->sel == win->nents - 1)*/
+                        /*return;*/
+                /*else*/
                 curscroll += scrolldir;
         } else {
+                cur = win->sel;
                 curscroll = 0;
         }
 }
@@ -874,7 +894,9 @@ main(int argc, char *argv[])
         f_namesort = 1;
         sortfn = namecmp;
 
-        setlocale(LC_ALL, "");
+        if (!setlocale(LC_ALL, ""))
+                die("sfm: no locale support");
+
         cursesinit();
 
         while (f_running) {
