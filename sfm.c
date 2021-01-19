@@ -179,8 +179,9 @@ static void      escape(char *, const char *);
 static void      xdelay(useconds_t);
 static void      echdir(const char *);
 static void     *emalloc(size_t);
-static void      die(const char *, ...);
 static void      cleanup(void);
+static void      usage(void);
+static void      die(const char *, ...);
 
 /* useful strings */
 static const char *cmds[] = {
@@ -268,7 +269,7 @@ cursesinit(void)
         int i = 1;
 
         if (!initscr())
-                die("sfm: initscr failed");
+                die("initscr:");
 
         noecho();
         cbreak();
@@ -292,7 +293,7 @@ entcount(char *path)
 
         /* FIXME: repating code, do something! */
         if ((dir = opendir(path)) == NULL)
-                die("sfm: opendir failed");
+                die("opendir:");
 
         while ((dent = readdir(dir)) != NULL) {
                 if (!strcmp(dent->d_name, "..") || !strcmp(dent->d_name, "."))
@@ -319,7 +320,7 @@ entget(char *path, ulong n)
         
         ents = emalloc(n * sizeof(Entry));
         if ((dir = opendir(path)) == NULL)
-                die("sfm: opendir failed");
+                die("opendir:");
 
         while ((dent = readdir(dir)) != NULL) {
                 if (!strcmp(dent->d_name, "..") || !strcmp(dent->d_name, "."))
@@ -850,8 +851,22 @@ emalloc(size_t nb)
         void *p;
 
         if ((p = malloc(nb)) == NULL)
-                die("sfm: emalloc:");
+                die("emalloc:");
         return p;
+}
+
+static void
+cleanup(void)
+{
+        entcleanup();
+        free(win);
+        endwin();
+}
+
+static void
+usage(void)
+{
+        die("usage: %s [-Hi]");
 }
 
 static void
@@ -872,14 +887,6 @@ die(const char *fmt, ...)
         exit(EXIT_FAILURE);
 }
 
-static void
-cleanup(void)
-{
-        entcleanup();
-        free(win);
-        endwin();
-}
-
 int
 main(int argc, char *argv[])
 {
@@ -895,7 +902,23 @@ main(int argc, char *argv[])
         sortfn = namecmp;
 
         if (!setlocale(LC_ALL, ""))
-                die("sfm: no locale support");
+                die("setlocale:");
+
+        while ((ch = getopt(argc, argv, "Hi")) != -1) {
+                switch (ch) {
+                case 'H':
+                        f_showall = 1;
+                        break;
+                case 'i':
+                        f_info = 1;
+                        break;
+                case '?': /* FALLTHROUGH */
+                default:
+                        usage();
+                }
+        }
+        argc -= optind;
+        argv += optind;
 
         cursesinit();
 
@@ -904,12 +927,12 @@ main(int argc, char *argv[])
 
                 if (f_redraw) {
                         if ((curdir = getcwd(cwd, sizeof(cwd))) == NULL)
-                                die("sfm: can't get cwd");
+                                die("getcwd:");
 
                         entcleanup();
                         win->nents = entcount(curdir);
                         if ((win->ents = entget(curdir, win->nents)) == NULL)
-                                die("sfm: can't get entries");
+                                die("entget:");
 
                         f_redraw = 0;
                         refresh();
